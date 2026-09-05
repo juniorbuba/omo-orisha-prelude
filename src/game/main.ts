@@ -102,9 +102,9 @@ function drawTrackSeg(g: Phaser.GameObjects.Graphics, zNear: number, zFar: numbe
   g.fillStyle(0xa07818, 1)
   const capH = Math.max(2, 6 * pN.s)
   g.fillRect(pN.x - wNear / 2, pN.y - capH, wNear, capH)
-  g.lineStyle(1, 0x5a4010, 0.6)
-  for (let li = -1; li <= 1; li += 2) {
-    const ln = proj(li * LANE_W, zNear), lf = proj(li * LANE_W, zFar)
+  g.lineStyle(2, 0xd8b04a, 0.85)
+  for (const d of [-0.5, 0.5]) {
+    const ln = proj(d * LANE_W, zNear), lf = proj(d * LANE_W, zFar)
     g.beginPath(); g.moveTo(ln.x, ln.y); g.lineTo(lf.x, lf.y); g.strokePath()
   }
   const pillarH = 80 * pF.s
@@ -153,7 +153,6 @@ export class Game extends Scene {
   private spawnTimer = 0
   private countdownVal = 3
   private countdownTimer: Phaser.Time.TimerEvent | null = null
-  private keys!: Record<string, Phaser.Input.Keyboard.Key>
   private touchStartX = 0
   private touchStartY = 0
   private pointerDown = false
@@ -176,7 +175,17 @@ export class Game extends Scene {
     this.enemyG = this.add.graphics().setDepth(3)
     this.playerG = this.add.graphics().setDepth(4)
     this.drawBackground()
-    this.keys = this.input.keyboard!.addKeys('A,D,W,S,SPACE,UP,DOWN,LEFT,RIGHT,ESC') as Record<string, Phaser.Input.Keyboard.Key>
+    // Discrete single-trigger keyboard listeners (one event per press) — replaces the
+    // old per-frame isDown polling that caused multiple lane changes per tick.
+    this.input.keyboard!.on('keydown-A', () => this.laneAction('left'))
+    this.input.keyboard!.on('keydown-LEFT', () => this.laneAction('left'))
+    this.input.keyboard!.on('keydown-D', () => this.laneAction('right'))
+    this.input.keyboard!.on('keydown-RIGHT', () => this.laneAction('right'))
+    this.input.keyboard!.on('keydown-W', () => this.laneAction('jump'))
+    this.input.keyboard!.on('keydown-UP', () => this.laneAction('jump'))
+    this.input.keyboard!.on('keydown-SPACE', () => this.laneAction('jump'))
+    this.input.keyboard!.on('keydown-S', () => this.laneAction('slide'))
+    this.input.keyboard!.on('keydown-DOWN', () => this.laneAction('slide'))
     this.input.keyboard!.on('keydown-ESC', () => { if (this.phase === 'PLAYING') this.setPaused(); else if (this.phase === 'PAUSED') this.setPlaying() })
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => { this.touchStartX = p.x; this.touchStartY = p.y; this.pointerDown = true })
     this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
@@ -370,15 +379,6 @@ export class Game extends Scene {
       this.distance += this.speed * dt * 0.35
       this.speed = this.baseSpeed + Math.min(4, this.distance / 600) + (this.boostTimer > 0 ? 3 : 0)
       this.curve = Math.sin(this.distance * 0.008) * 28
-
-      if (this.keys.A.isDown || this.keys.LEFT.isDown) { if (this.lane > 0) { this.lane--; this.targetLaneX = (this.lane - 1) * LANE_W } }
-      if (this.keys.D.isDown || this.keys.RIGHT.isDown) { if (this.lane < 2) { this.lane++; this.targetLaneX = (this.lane - 1) * LANE_W } }
-      if ((this.keys.W.isDown || this.keys.UP.isDown || this.keys.SPACE.isDown) && !this.jumping && !this.sliding) {
-        this.jumping = true; this.jumpV = -13; this.playerMode = 'jump'; this.safePlay('sfx_jump')
-      }
-      if ((this.keys.S.isDown || this.keys.DOWN.isDown) && !this.jumping && !this.sliding) {
-        this.sliding = true; this.slideTimer = 38; this.playerMode = 'slide'
-      }
 
       if (this.jumping) {
         this.playerYOff += this.jumpV * dt; this.jumpV += 0.65 * dt
