@@ -98,6 +98,115 @@ body,
     gap: 8px;
 }
 
+.hud-left-group {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+}
+
+/* ---------- HP meter ---------- */
+.hp-meter {
+    width: min(220px, 46vw);
+    padding: 8px 12px 10px;
+    border-radius: 12px;
+    background: rgba(18, 11, 36, 0.78);
+    border: 1px solid rgba(255, 120, 120, 0.35);
+    backdrop-filter: blur(4px);
+}
+
+.hp-head {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    color: #ff9a9a;
+    margin-bottom: 6px;
+}
+
+.hp-track {
+    height: 10px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+}
+
+.hp-fill {
+    height: 100%;
+    border-radius: 6px;
+    background: linear-gradient(90deg, #c0392b, #ff6b6b);
+    transition: width 0.2s ease;
+}
+
+/* ---------- Mobile touch controls ---------- */
+.touch-controls {
+    display: none;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 18px 20px calc(18px + env(safe-area-inset-bottom, 0px));
+    justify-content: space-between;
+    align-items: flex-end;
+    pointer-events: none;
+    z-index: 20;
+}
+
+.touch-pad,
+.touch-actions {
+    display: flex;
+    gap: 14px;
+    align-items: flex-end;
+}
+
+.touch-btn {
+    pointer-events: auto;
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 194, 102, 0.5);
+    background: rgba(18, 11, 36, 0.6);
+    color: #ffc266;
+    font-size: 22px;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.touch-btn:active {
+    background: rgba(255, 194, 102, 0.3);
+    transform: scale(0.94);
+}
+
+.touch-jump {
+    border-color: rgba(120, 220, 255, 0.6);
+    color: #bfefff;
+}
+
+.touch-punch {
+    background: rgba(140, 40, 40, 0.55);
+    border-color: rgba(255, 120, 120, 0.6);
+    color: #ffd0d0;
+}
+
+.touch-surge {
+    background: rgba(200, 110, 20, 0.55);
+    border-color: rgba(255, 180, 80, 0.7);
+    color: #ffe9c2;
+}
+
+@media (pointer: coarse) {
+    .touch-controls {
+        display: flex;
+    }
+    .controls-hint {
+        display: none;
+    }
+}
+
 .icon-btn {
     pointer-events: auto;
     width: 40px;

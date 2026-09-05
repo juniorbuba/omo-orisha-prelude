@@ -1,9 +1,9 @@
 // ---------------------------------------------------------------------------
 // OMO ORISHA — React shell.
-// Mounts the Phaser + three.js game into #game-container and renders ALL
-// primary UI as DOM overlays: title menu, awakening intro slides, HUD
-// (power meter, checkpoint toasts, banners), pause, win & loss screens.
-// Talks to the scene only through the EventBus (src/game/main.ts).
+// Mounts the Phaser game into #game-container and renders ALL primary UI as
+// DOM overlays: title menu, awakening intro slides (10s total), HUD (HP bar,
+// Ogun power meter, mobile combat buttons, checkpoint toasts, banners), pause,
+// win & loss screens. Talks to the scene only through the EventBus.
 // ---------------------------------------------------------------------------
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import StartGame, { EventBus, EV, GameManager } from './game/main';
@@ -18,7 +18,7 @@ export interface IRefPhaserGame
 const INTRO_LINES = [
     { title: 'LAGOS NEVER SLEEPS', body: 'A boy runs the city’s spine — danfo roofs, container stacks, market decks.' },
     { title: 'THE OLD ONES REMEMBER', body: 'Ogun’s iron fire sleeps in his blood. One surge. One road.' },
-    { title: 'REACH THE SHRINE GATE', body: 'Step on every ancestor stone. Do not fall. Do not be caught.' },
+    { title: 'REACH THE SHRINE GATE', body: 'Step on every ancestor stone. Fight through the enforcers. Do not fall.' },
 ];
 
 function IconPlay()
@@ -67,6 +67,7 @@ function App()
     const [banner, setBanner] = useState('');
     const [checkpoint, setCheckpoint] = useState(-1);
     const [power, setPower] = useState({ active: false, pct: 100 });
+    const [health, setHealth] = useState({ hp: 100, maxHp: 100 });
     const [deathReason, setDeathReason] = useState<DeathReason>('FELL_INTO_PIT');
     const [muted, setMuted] = useState(false);
     const [hasSave, setHasSave] = useState(false);
@@ -114,12 +115,14 @@ function App()
         const onBanner = (text: string) => setBanner(text);
         const onCheckpoint = (idx: number) => setCheckpoint(idx);
         const onPower = (s: { active: boolean; pct: number }) => setPower(s);
+        const onHealth = (s: { hp: number; maxHp: number }) => setHealth(s);
         const onDeath = (r: DeathReason) => setDeathReason(r);
 
         EventBus.on(EV.PHASE_CHANGED, onPhase);
         EventBus.on(EV.BANNER, onBanner);
         EventBus.on(EV.CHECKPOINT, onCheckpoint);
         EventBus.on(EV.POWER_STATE, onPower);
+        EventBus.on(EV.HEALTH_STATE, onHealth);
         EventBus.on(EV.DEATH_REASON, onDeath);
 
         return () =>
@@ -128,6 +131,7 @@ function App()
             EventBus.removeListener(EV.BANNER, onBanner);
             EventBus.removeListener(EV.CHECKPOINT, onCheckpoint);
             EventBus.removeListener(EV.POWER_STATE, onPower);
+            EventBus.removeListener(EV.HEALTH_STATE, onHealth);
             EventBus.removeListener(EV.DEATH_REASON, onDeath);
         };
     }, []);
@@ -157,11 +161,11 @@ function App()
         return () => window.removeEventListener('keydown', onKey);
     }, []);
 
-    //  Intro slides auto-advance while the scene plays the awakening beat.
+    //  Intro slides auto-advance: 3 slides over 10 seconds total (~3.33s each).
     useEffect(() =>
     {
         if (phase !== 'INTRO') return;
-        const id = window.setInterval(() => setIntroSlide((s) => Math.min(s + 1, INTRO_LINES.length - 1)), 1600);
+        const id = window.setInterval(() => setIntroSlide((s) => Math.min(s + 1, INTRO_LINES.length - 1)), 3333);
         return () => window.clearInterval(id);
     }, [phase]);
 
@@ -178,6 +182,11 @@ function App()
         EventBus.emit(EV.BACK_TO_MENU);
     };
 
+    const attack = (type: 'punch' | 'surge') =>
+    {
+        EventBus.emit(EV.ATTACK_ACTION, type);
+    };
+
     const toggleMute = () =>
     {
         const game = phaserRef.current?.game;
@@ -187,6 +196,7 @@ function App()
     };
 
     const playing = phase === 'PLAYING' || phase === 'INTRO' || phase === 'PAUSED';
+    const hpPct = Math.max(0, Math.min(100, (health.hp / health.maxHp) * 100));
 
     return (
         <div id="app">
@@ -197,9 +207,20 @@ function App()
                 {/* ---------- HUD (top bar) ---------- */}
                 {playing && (
                     <div className="hud-top">
-                        <div className="hud-chip">
-                            <span className="hud-label">ANCESTOR STONES</span>
-                            <span className="hud-value">{Math.max(0, checkpoint + 1)} / 3</span>
+                        <div className="hud-left-group">
+                            <div className="hud-chip">
+                                <span className="hud-label">ANCESTOR STONES</span>
+                                <span className="hud-value">{Math.max(0, checkpoint + 1)} / 3</span>
+                            </div>
+                            <div className="hp-meter">
+                                <div className="hp-head">
+                                    <span>KOLADE</span>
+                                    <span>{Math.max(0, Math.round(health.hp))}</span>
+                                </div>
+                                <div className="hp-track">
+                                    <div className="hp-fill" style={{ width: `${hpPct}%` }} />
+                                </div>
+                            </div>
                         </div>
                         <div className="hud-right">
                             <button className="icon-btn" onClick={toggleMute} aria-label={muted ? 'Unmute' : 'Mute'}>
@@ -214,7 +235,7 @@ function App()
                     </div>
                 )}
 
-                {/* ---------- Power meter (bottom) ---------- */}
+                {/* ---------- Bottom bar (power meter + hints) ---------- */}
                 {playing && (
                     <div className="hud-bottom">
                         <div className={`power-meter ${power.active ? 'power-active' : ''}`}>
@@ -227,7 +248,22 @@ function App()
                             </div>
                         </div>
                         <div className="controls-hint">
-                            <b>WASD</b> move &middot; <b>SPACE</b> jump &middot; <b>F / SHIFT</b> power &middot; <b>ESC</b> pause
+                            <b>WASD / ARROWS</b> move &middot; <b>SPACE</b> jump &middot; <b>J</b> punch &middot; <b>K</b> surge &middot; <b>F</b> power &middot; <b>ESC</b> pause
+                        </div>
+                    </div>
+                )}
+
+                {/* ---------- Mobile combat / movement buttons ---------- */}
+                {phase === 'PLAYING' && 'ontouchstart' in window && (
+                    <div className="touch-controls">
+                        <div className="touch-pad">
+                            <button className="touch-btn" onPointerDown={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'a' }))} onPointerUp={() => window.dispatchEvent(new KeyboardEvent('keyup', { key: 'a' }))} aria-label="Left">◀</button>
+                            <button className="touch-btn" onPointerDown={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'd' }))} onPointerUp={() => window.dispatchEvent(new KeyboardEvent('keyup', { key: 'd' }))} aria-label="Right">▶</button>
+                            <button className="touch-btn touch-jump" onPointerDown={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ' }))} onPointerUp={() => window.dispatchEvent(new KeyboardEvent('keyup', { key: ' ' }))} aria-label="Jump">▲</button>
+                        </div>
+                        <div className="touch-actions">
+                            <button className="touch-btn touch-punch" onPointerDown={() => attack('punch')} aria-label="Punch">J</button>
+                            <button className="touch-btn touch-surge" onPointerDown={() => attack('surge')} aria-label="Surge">K</button>
                         </div>
                     </div>
                 )}
@@ -250,7 +286,8 @@ function App()
                             <h1 className="title">OMO <span className="gold">ORISHA</span></h1>
                             <p className="tagline">
                                 A young Lagos boy channels the Orisha across danfo rooftops,
-                                stacked containers and market platforms — to reach the shrine gate.
+                                stacked containers and market platforms — punching and surging
+                                through enforcers to reach the shrine gate.
                             </p>
                             <div className="btn-row">
                                 <button className="btn btn-primary" onClick={() => startGame(false)}>
@@ -263,9 +300,10 @@ function App()
                                 )}
                             </div>
                             <div className="menu-hints">
-                                <span><b>WASD</b> move</span>
+                                <span><b>WASD / ARROWS</b> move</span>
                                 <span><b>SPACE</b> jump</span>
-                                <span><b>F / SHIFT</b> Ogun's surge</span>
+                                <span><b>J</b> punch &middot; <b>K</b> surge</span>
+                                <span><b>F / SHIFT</b> Ogun's power</span>
                                 <span><b>ESC</b> pause</span>
                             </div>
                         </div>
@@ -331,7 +369,7 @@ function App()
                             <p className="tagline">
                                 {deathReason === 'FELL_INTO_PIT'
                                     ? 'You missed a leap between the rooftops. The city swallows the careless.'
-                                    : 'The agbolo’s stick found you on the market platform. Run smarter.'}
+                                    : 'The enforcers struck you down. Fight smarter — punch and surge.'}
                             </p>
                             <div className="btn-row">
                                 {hasSave && (
