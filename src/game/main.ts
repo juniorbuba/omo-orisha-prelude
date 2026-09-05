@@ -1,1261 +1,502 @@
-// ---------------------------------------------------------------------------
-// OMO ORISHA — A Lagos Saga
-// 2D side-scrolling platformer with combat mechanics in Phaser 4.
-// Features: Kolade hero with multi-frame spritesheets (idle, run, punch, surge),
-// enemy enforcers with walk/hurt/defeat animations, Lagos vehicles (Danfo bus,
-// Keke Napep, sedans, trucks), NPC passersby, and Orisha shrine gate.
-// ---------------------------------------------------------------------------
-import { AUTO, BlendModes, Events, Game as PhaserGame, Scale, Scene } from 'phaser';
+import { Scene, Game as PhaserGame, AUTO, Scale, Events } from 'phaser'
 
-// ---------------------------------------------------------------------------
-// GAME CONSTANTS
-// ---------------------------------------------------------------------------
-export const GAME_WIDTH = 960;
-export const GAME_HEIGHT = 540;
+export const EventBus = new Events.EventEmitter()
 
-export const COLORS = {
-    BACKGROUND: 0x120b24,
-    TEXT: '#ffffff',
-} as const;
+const W = 960, H = 540
+const FOCAL = 280
+const HORIZON_Y = 170
+const BOTTOM_Y = H + 60
+const LANE_W = 90
+const SPAWN_Z = 1400
+const PLAYER_SCREEN_Y = H - 110
 
-// ---------------------------------------------------------------------------
-// EVENT NAMES — defined once, imported by both the scene and App.tsx so the
-// React <-> Phaser contract can never drift.
-// ---------------------------------------------------------------------------
-export const EV = {
-    PHASE_CHANGED: 'phase-changed',
-    DEATH_REASON: 'death-reason',
-    CHECKPOINT: 'checkpoint',
-    START_GAME: 'start-game',
-    SKIP_INTRO: 'skip-intro',
-    POWER_STATE: 'power-state',
-    HEALTH_STATE: 'health-state',
-    BANNER: 'banner',
-    PAUSE: 'pause',
-    RESUME: 'resume',
-    BACK_TO_MENU: 'back-to-menu',
-    ATTACK_ACTION: 'attack-action',
-    CURRENT_SCENE_READY: 'current-scene-ready',
-} as const;
+type Phase = 'MENU' | 'COUNTDOWN' | 'PLAYING' | 'PAUSED' | 'LOSS'
 
-export type Phase = 'MENU' | 'INTRO' | 'PLAYING' | 'WIN' | 'LOSS';
-export type DeathReason = 'FELL_INTO_PIT' | 'CAUGHT_BY_ENEMY';
-
-// ---------------------------------------------------------------------------
-// GAME MANAGER — checkpoint / save persistence
-// ---------------------------------------------------------------------------
-const SAVE_KEY = 'omo_orisha_save';
-
-export const GameManager = {
-    hasSavedGame(): boolean {
-        try { return localStorage.getItem(SAVE_KEY) !== null; } catch { return false; }
-    },
-    getCheckpoint(): { x: number; y: number } | null {
-        try {
-            const raw = localStorage.getItem(SAVE_KEY);
-            if (!raw) return null;
-            const d = JSON.parse(raw) as { x: number; y: number };
-            return { x: d.x, y: d.y };
-        } catch { return null; }
-    },
-    setCheckpoint(p: { x: number; y: number }): void {
-        try { localStorage.setItem(SAVE_KEY, JSON.stringify(p)); } catch { /* private mode */ }
-    },
-};
-
-// ---------------------------------------------------------------------------
-// EVENT BUS — shared React <-> Phaser bridge (named export).
-// ---------------------------------------------------------------------------
-export const EventBus = new Events.EventEmitter();
-
-// ---------------------------------------------------------------------------
-// WORLD DATA — Lagos street: danfo rooftops, container stacks, market
-// planks, checkpoints (stone plinths), enemies, shrine gate goal.
-// ---------------------------------------------------------------------------
-type BoxDef = [number, number, number, number];
-
-const SPAWN: BoxDef = [0, 0, 10, 1];
-const DANFOS: BoxDef[] = [
-    [8, -0.5, 6, 2],
-    [15.5, -1, 6, 3],
-    [23, -1.5, 6, 4],
-];
-const CONTAINERS: BoxDef[] = [
-    [31, -1, 6, 2],
-    [31, -2.5, 6, 1],
-];
-const MARKET: BoxDef[] = [
-    [39, -1.5, 7, 3],
-    [46.5, -2, 6, 4],
-];
-const SHRINE: BoxDef = [54, 0, 8, 1];
-const ALL_PLATFORMS: BoxDef[] = [SPAWN, ...DANFOS, ...CONTAINERS, ...MARKET, SHRINE];
-
-const CHECKPOINTS: { pos: [number, number]; trigger: BoxDef }[] = [
-    { pos: [23, -1.5], trigger: [23, -1.5, 3, 1.6] },
-    { pos: [31, -2.5], trigger: [31, -2.5, 3, 1.8] },
-    { pos: [46.5, -2], trigger: [46.5, -2, 3, 1.6] },
-];
-
-const ENEMY_PATROLS: BoxDef[] = [
-    [39, -1.5, 7, 3],
-    [46.5, -2, 6, 4],
-];
-const ENEMY_START_POSITIONS = [37, 44];
-const ENEMY_CHASE_RANGE = 7;
-const SHRINE_TRIGGER: BoxDef = [54, -1.8, 3.5, 4];
-
-const WORLD_MIN_X = -62;
-const WORLD_MAX_X = 62;
-const KILL_Y = 10;
-
-// Player kinematics
-const PLAYER_SPEED = 7.5;
-const JUMP_VELOCITY = 10;
-const GRAVITY = 24;
-const POWER_DURATION = 3;
-const POWER_COOLDOWN = 6;
-const POWER_SPEED_MULT = 1.6;
-const PLAYER_HALF = 0.4;
-const PLAYER_HEIGHT = 1.6;
-const PLAYER_MAX_HP = 100;
-const ATTACK_RANGE = 1.8;
-const ATTACK_DAMAGE = 35;
-const SURGE_DAMAGE = 100;
-
-// ---------------------------------------------------------------------------
-// PHASER CONFIG / FACTORY
-// ---------------------------------------------------------------------------
-const StartGame = (parent: string) =>
-{
-    const config: Phaser.Types.Core.GameConfig = {
-        type: AUTO,
-        width: GAME_WIDTH,
-        height: GAME_HEIGHT,
-        parent,
-        backgroundColor: '#050508',
-        scale: {
-            mode: Scale.FIT,
-            autoCenter: Scale.CENTER_BOTH,
-        },
-        physics: {
-            default: 'arcade',
-            arcade: { gravity: { x: 0, y: 0 } },
-        },
-        scene: [Game],
-    };
-
-    const game = new PhaserGame(config);
-    if (typeof window !== 'undefined') {
-        (window as any).__PHASER_GAME__ = game;
-        (window as any).__PHASER_EVENT_BUS__ = EventBus;
-    }
-    return game;
-};
-
-// ---------------------------------------------------------------------------
-// THE GAME SCENE — 2D world + Phaser input/audio/EventBus bridge.
-// ---------------------------------------------------------------------------
-type Platform = { minX: number; maxX: number; top: number };
-type TriggerKind = 'checkpoint' | 'checkpoint-done' | 'enemy' | 'enemy-done' | 'shrine';
-type Trigger = { minX: number; maxX: number; top: number; kind: TriggerKind; index: number };
-
-type EnemyState = 'patrol' | 'chase' | 'hurt' | 'defeated';
-interface Enemy {
-    x: number;
-    y: number;
-    dir: number;
-    hp: number;
-    state: EnemyState;
-    patrolIndex: number;
-    sprite: Phaser.GameObjects.Container;
-    body: Phaser.GameObjects.Rectangle;
-    head: Phaser.GameObjects.Arc;
+interface Obstacle {
+  lane: number; z: number; type: 'barrier' | 'arch' | 'pit'; alive: boolean; sprite: Phaser.GameObjects.Graphics
+}
+interface Coin {
+  lane: number; z: number; alive: boolean; sprite: Phaser.GameObjects.Graphics
+}
+interface Powerup {
+  lane: number; z: number; type: 'magnet' | 'shield' | 'boost'; alive: boolean; sprite: Phaser.GameObjects.Graphics
 }
 
-interface NPC {
-    x: number;
-    y: number;
-    sprite: Phaser.GameObjects.Container;
-    bobPhase: number;
+function proj(laneX: number, z: number) {
+  const s = FOCAL / (FOCAL + z)
+  return { x: W / 2 + laneX * s, y: HORIZON_Y + (BOTTOM_Y - HORIZON_Y) * s, s }
 }
 
-export class Game extends Scene
-{
-    // world / visuals
-    private worldContainer!: Phaser.GameObjects.Container;
-    private platforms: Platform[] = [];
-    private triggers: Trigger[] = [];
-    private playerSprite!: Phaser.GameObjects.Container;
-    private playerBody!: Phaser.GameObjects.Sprite;
-    private enemies: Enemy[] = [];
-    private npcs: NPC[] = [];
-    private shrineGlow!: Phaser.GameObjects.Image;
-    private aura!: Phaser.GameObjects.Particles.ParticleEmitter;
-    private menuT = 0;
-
-    // player state
-    private px = 0; private py = -0.2;
-    private vx = 0; private vy = 0;
-    private onGround = false;
-    private inputEnabled = false;
-    private powerActive = false;
-    private powerTimer = 0;
-    private powerCooldown = 0;
-    private powerFired = false;
-    private facing = 1;
-    private hp = PLAYER_MAX_HP;
-    private attackCooldown = 0;
-    private isAttacking = false;
-    private attackType: 'punch' | 'surge' | null = null;
-    private attackTimer = 0;
-    private lastAnimState = 'idle';
-
-    // sequence state
-    private phase: Phase = 'MENU';
-    private paused = false;
-    private deathReason: DeathReason = 'FELL_INTO_PIT';
-    private introDone = false;
-    private introT = 0;
-    private lastPowerEmit = -1;
-    private lastHpEmit = -1;
-
-    // input
-    private keys!: Record<string, Phaser.Input.Keyboard.Key>;
-
-    constructor ()
-    {
-        super('Game');
-    }
-
-    preload ()
-    {
-        // Pre-packaged universal audio (public/assets/audio/)
-        this.load.audio('sfx_jump', 'assets/audio/sfx_jump.mp3');
-        this.load.audio('sfx_powerup', 'assets/audio/sfx_powerup.mp3');
-        this.load.audio('sfx_button', 'assets/audio/sfx_button.mp3');
-        this.load.audio('sfx_win', 'assets/audio/sfx_win.mp3');
-        this.load.audio('sfx_gameover', 'assets/audio/sfx_gameover.mp3');
-        this.load.audio('sfx_hit', 'assets/audio/sfx_hit.mp3');
-        this.load.image('fx_glow', 'assets/fx/glow.png');
-        this.load.image('fx_spark', 'assets/fx/spark.png');
-    }
-
-    create ()
-    {
-        // Generate all procedural sprite textures
-        this.generatePlayerTextures();
-        this.generateEnemyTextures();
-        this.generateVehicleTextures();
-        this.generateNPCTextures();
-        this.generateShrineTextures();
-
-        // Gradient sky
-        const sky = this.add.graphics();
-        sky.fillGradientStyle(0x120b24, 0x120b24, 0x963816, 0x963816, 1);
-        sky.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
-        sky.setScrollFactor(0);
-        sky.setDepth(-100);
-
-        // Parallax skyline layers
-        this.buildSkyline(0.15, 0x1b1230, 0.5);
-        this.buildSkyline(0.35, 0x241a3a, 0.75);
-        this.buildSkyline(0.6, 0x2a1f42, 1);
-
-        // World container
-        this.worldContainer = this.add.container(0, 0);
-        this.worldContainer.setDepth(0);
-
-        this.buildWorld();
-        this.buildPlayer();
-        this.buildEnemies();
-        this.buildNPCs();
-        this.buildShrine();
-        this.buildAura();
-
-        // Phaser input (keyboard) + audio
-        this.keys = this.input.keyboard!.addKeys('W,A,S,D,SPACE,F,SHIFT,J,K,Z,X,E,ARROW_LEFT,ARROW_RIGHT,ARROW_UP,ARROW_DOWN') as Record<string, Phaser.Input.Keyboard.Key>;
-        this.input.keyboard!.on('keydown-SPACE', () =>
-        {
-            if (this.phase === 'INTRO') EventBus.emit(EV.SKIP_INTRO);
-        });
-        this.input.keyboard!.on('keydown-ENTER', () =>
-        {
-            if (this.phase === 'INTRO') EventBus.emit(EV.SKIP_INTRO);
-        });
-
-        // React -> scene commands
-        const onStart = (data: { fromCheckpoint: boolean }) => this.beginLevel(data?.fromCheckpoint ?? false);
-        const onSkip = () =>
-        {
-            if (this.phase === 'INTRO') this.finishIntro();
-        };
-        const onPause = () =>
-        {
-            if (this.phase !== 'PLAYING') return;
-            this.paused = true;
-            this.sound.pauseAll();
-        };
-        const onResume = () =>
-        {
-            if (!this.paused) return;
-            this.paused = false;
-            this.sound.resumeAll();
-        };
-        const onBackToMenu = () =>
-        {
-            this.paused = false;
-            this.phase = 'MENU';
-            this.inputEnabled = false;
-            this.sound.stopAll();
-            EventBus.emit(EV.PHASE_CHANGED, 'MENU' as Phase);
-        };
-        const onAttackAction = (type: 'punch' | 'surge') =>
-        {
-            if (this.inputEnabled && this.phase === 'PLAYING')
-            {
-                this.performAttack(type);
-            }
-        };
-
-        EventBus.on(EV.START_GAME, onStart);
-        EventBus.on(EV.SKIP_INTRO, onSkip);
-        EventBus.on(EV.PAUSE, onPause);
-        EventBus.on(EV.RESUME, onResume);
-        EventBus.on(EV.BACK_TO_MENU, onBackToMenu);
-        EventBus.on(EV.ATTACK_ACTION, onAttackAction);
-
-        this.events.once('shutdown', () =>
-        {
-            EventBus.off(EV.START_GAME, onStart);
-            EventBus.off(EV.SKIP_INTRO, onSkip);
-            EventBus.off(EV.PAUSE, onPause);
-            EventBus.off(EV.RESUME, onResume);
-            EventBus.off(EV.BACK_TO_MENU, onBackToMenu);
-            EventBus.off(EV.ATTACK_ACTION, onAttackAction);
-            this.time.removeAllEvents();
-            this.tweens.killAll();
-            this.input.keyboard?.removeAllListeners();
-            this.sound.stopAll();
-        });
-
-        // Boot into MENU
-        this.phase = 'MENU';
-        EventBus.emit(EV.PHASE_CHANGED, 'MENU' as Phase);
-        EventBus.emit(EV.CURRENT_SCENE_READY, this);
-    }
-
-    // -----------------------------------------------------------------
-    // PROCEDURAL TEXTURE GENERATORS
-    // -----------------------------------------------------------------
-    private generatePlayerTextures()
-    {
-        // Kolade idle frame
-        const idle = this.add.graphics();
-        idle.fillStyle(0x3d2b1f, 1); // dark brown body
-        idle.fillRect(-16, -64, 32, 64);
-        idle.fillStyle(0xe5a93c, 1); // amber wrap
-        idle.fillEllipse(0, -64, 40, 12);
-        idle.fillStyle(0xf2e3c8, 1); // face
-        idle.fillRect(-8, -58, 16, 10);
-        idle.generateTexture('kolade_idle', 64, 80);
-        idle.destroy();
-
-        // Kolade run frames (4-frame cycle)
-        for (let i = 0; i < 4; i++)
-        {
-            const run = this.add.graphics();
-            run.fillStyle(0x3d2b1f, 1);
-            run.fillRect(-16, -64, 32, 64);
-            run.fillStyle(0xe5a93c, 1);
-            run.fillEllipse(0, -64, 40, 12);
-            run.fillStyle(0xf2e3c8, 1);
-            run.fillRect(-8, -58, 16, 10);
-            // Leg swing animation
-            const legOffset = Math.sin(i * Math.PI / 2) * 8;
-            run.fillStyle(0x2a1f15, 1);
-            run.fillRect(-12, 0, 8, 16 + legOffset);
-            run.fillRect(4, 0, 8, 16 - legOffset);
-            run.generateTexture(`kolade_run_${i}`, 64, 96);
-            run.destroy();
-        }
-
-        // Kolade punch frame
-        const punch = this.add.graphics();
-        punch.fillStyle(0x3d2b1f, 1);
-        punch.fillRect(-16, -64, 32, 64);
-        punch.fillStyle(0xe5a93c, 1);
-        punch.fillEllipse(0, -64, 40, 12);
-        punch.fillStyle(0xf2e3c8, 1);
-        punch.fillRect(-8, -58, 16, 10);
-        // Extended arm
-        punch.fillStyle(0x3d2b1f, 1);
-        punch.fillRect(16, -50, 24, 8);
-        punch.fillStyle(0xffa500, 0.6);
-        punch.fillCircle(44, -46, 12);
-        punch.generateTexture('kolade_punch', 96, 80);
-        punch.destroy();
-
-        // Kolade surge frame
-        const surge = this.add.graphics();
-        surge.fillStyle(0x3d2b1f, 1);
-        surge.fillRect(-16, -64, 32, 64);
-        surge.fillStyle(0xe5a93c, 1);
-        surge.fillEllipse(0, -64, 40, 12);
-        surge.fillStyle(0xf2e3c8, 1);
-        surge.fillRect(-8, -58, 16, 10);
-        // Energy aura
-        surge.fillStyle(0xff6600, 0.4);
-        surge.fillCircle(0, -32, 48);
-        surge.lineStyle(3, 0xffaa00, 0.8);
-        surge.strokeCircle(0, -32, 40);
-        surge.generateTexture('kolade_surge', 128, 128);
-        surge.destroy();
-
-        // (Run-cycle animation is driven manually by swapping kolade_run_0..3
-        //  textures in updatePlayer — avoids the load.spritesheet requirement.)
-    }
-
-    private generateEnemyTextures()
-    {
-        // Enforcer patrol frame
-        const patrol = this.add.graphics();
-        patrol.fillStyle(0x8f1d1d, 1); // dark red body
-        patrol.fillRect(-20, -52, 40, 52);
-        patrol.fillStyle(0x520b0b, 1); // head
-        patrol.fillCircle(0, -60, 16);
-        patrol.fillStyle(0xff0000, 1); // glowing eyes
-        patrol.fillCircle(-6, -62, 3);
-        patrol.fillCircle(6, -62, 3);
-        patrol.generateTexture('enemy_patrol', 64, 80);
-        patrol.destroy();
-
-        // Enforcer chase frame (leaning forward)
-        const chase = this.add.graphics();
-        chase.fillStyle(0x8f1d1d, 1);
-        chase.fillRect(-20, -52, 40, 52);
-        chase.fillStyle(0x520b0b, 1);
-        chase.fillCircle(4, -58, 16);
-        chase.fillStyle(0xff0000, 1);
-        chase.fillCircle(-2, -60, 3);
-        chase.fillCircle(10, -60, 3);
-        chase.generateTexture('enemy_chase', 64, 80);
-        chase.destroy();
-
-        // Enforcer hurt frame (flashing)
-        const hurt = this.add.graphics();
-        hurt.fillStyle(0xff6666, 1);
-        hurt.fillRect(-20, -52, 40, 52);
-        hurt.fillStyle(0x520b0b, 1);
-        hurt.fillCircle(0, -60, 16);
-        hurt.fillStyle(0xffffff, 1);
-        hurt.fillCircle(-6, -62, 3);
-        hurt.fillCircle(6, -62, 3);
-        hurt.generateTexture('enemy_hurt', 64, 80);
-        hurt.destroy();
-
-        // Enforcer defeated frame (fading)
-        const defeated = this.add.graphics();
-        defeated.fillStyle(0x520b0b, 0.3);
-        defeated.fillRect(-20, -52, 40, 52);
-        defeated.fillStyle(0x2a0505, 0.3);
-        defeated.fillCircle(0, -60, 16);
-        defeated.generateTexture('enemy_defeated', 64, 80);
-        defeated.destroy();
-    }
-
-    private generateVehicleTextures()
-    {
-        // Danfo bus (yellow with black stripes)
-        const danfo = this.add.graphics();
-        danfo.fillStyle(0xe8b420, 1); // Lagos yellow
-        danfo.fillRect(0, 0, 240, 80);
-        danfo.fillStyle(0x000000, 1); // black stripes
-        danfo.fillRect(0, 20, 240, 8);
-        danfo.fillRect(0, 52, 240, 8);
-        danfo.fillStyle(0x333333, 1); // windows
-        danfo.fillRect(20, 5, 30, 15);
-        danfo.fillRect(60, 5, 30, 15);
-        danfo.fillRect(100, 5, 30, 15);
-        danfo.fillRect(140, 5, 30, 15);
-        danfo.fillRect(180, 5, 30, 15);
-        danfo.fillStyle(0x222222, 1); // wheels
-        danfo.fillCircle(40, 80, 12);
-        danfo.fillCircle(200, 80, 12);
-        danfo.generateTexture('danfo_bus', 240, 92);
-        danfo.destroy();
-
-        // Keke Napep (tricycle)
-        const keke = this.add.graphics();
-        keke.fillStyle(0xe8b420, 1);
-        keke.fillRect(0, 0, 100, 60);
-        keke.fillStyle(0x1a1a1a, 1);
-        keke.fillRect(0, 10, 100, 30);
-        keke.fillStyle(0x222222, 1);
-        keke.fillCircle(20, 60, 10);
-        keke.fillCircle(80, 60, 10);
-        keke.generateTexture('keke_napep', 100, 70);
-        keke.destroy();
-
-        // Sedan car
-        const sedan = this.add.graphics();
-        sedan.fillStyle(0x274c77, 1);
-        sedan.fillRect(0, 10, 120, 40);
-        sedan.fillStyle(0x3a6ea5, 1);
-        sedan.fillRect(20, 0, 80, 20);
-        sedan.fillStyle(0x222222, 1);
-        sedan.fillCircle(30, 50, 10);
-        sedan.fillCircle(90, 50, 10);
-        sedan.generateTexture('sedan_car', 120, 60);
-        sedan.destroy();
-
-        // Container truck
-        const truck = this.add.graphics();
-        truck.fillStyle(0x8a3b1e, 1);
-        truck.fillRect(40, 0, 160, 70);
-        truck.fillStyle(0x2a1f15, 1);
-        truck.fillRect(0, 20, 40, 50);
-        truck.fillStyle(0x222222, 1);
-        truck.fillCircle(20, 70, 12);
-        truck.fillCircle(80, 70, 12);
-        truck.fillCircle(160, 70, 12);
-        truck.generateTexture('container_truck', 200, 82);
-        truck.destroy();
-    }
-
-    private generateNPCTextures()
-    {
-        // Market trader woman
-        const trader = this.add.graphics();
-        trader.fillStyle(0x96683c, 1);
-        trader.fillRect(-14, -56, 28, 56);
-        trader.fillStyle(0xff69b4, 1); // colorful gele
-        trader.fillEllipse(0, -60, 32, 16);
-        trader.fillStyle(0xf2e3c8, 1);
-        trader.fillRect(-7, -52, 14, 8);
-        trader.fillStyle(0x8b4513, 1); // tray
-        trader.fillRect(-20, -70, 40, 6);
-        trader.generateTexture('npc_trader', 64, 80);
-        trader.destroy();
-
-        // Lagos commuter
-        const commuter = this.add.graphics();
-        commuter.fillStyle(0x4a5568, 1);
-        commuter.fillRect(-14, -56, 28, 56);
-        commuter.fillStyle(0x1a202c, 1);
-        commuter.fillEllipse(0, -60, 28, 12);
-        commuter.fillStyle(0xf2e3c8, 1);
-        commuter.fillRect(-7, -52, 14, 8);
-        commuter.fillStyle(0x000000, 1); // sunglasses
-        commuter.fillRect(-8, -48, 16, 4);
-        commuter.generateTexture('npc_commuter', 64, 80);
-        commuter.destroy();
-
-        // Elder baba
-        const elder = this.add.graphics();
-        elder.fillStyle(0xffffff, 1); // flowing white robe
-        elder.fillRect(-16, -56, 32, 56);
-        elder.fillStyle(0x2a1f15, 1); // fila cap
-        elder.fillEllipse(0, -62, 26, 10);
-        elder.fillStyle(0xf2e3c8, 1);
-        elder.fillRect(-7, -52, 14, 8);
-        elder.fillStyle(0x654321, 1); // staff
-        elder.fillRect(18, -60, 4, 70);
-        elder.generateTexture('npc_elder', 64, 80);
-        elder.destroy();
-    }
-
-    private generateShrineTextures()
-    {
-        // Shrine gate structure
-        const gate = this.add.graphics();
-        gate.fillStyle(0xd99b26, 1); // golden wood
-        gate.fillRect(0, 0, 320, 16); // lintel
-        gate.fillRect(0, 0, 24, 280); // left post
-        gate.fillRect(296, 0, 24, 280); // right post
-        // Carved details
-        gate.fillStyle(0x8b4513, 1);
-        for (let i = 0; i < 5; i++)
-        {
-            gate.fillRect(4, 40 + i * 40, 16, 8);
-            gate.fillRect(300, 40 + i * 40, 16, 8);
-        }
-        // Iron totems
-        gate.fillStyle(0x4a4a4a, 1);
-        gate.fillRect(80, 16, 8, 100);
-        gate.fillRect(232, 16, 8, 100);
-        gate.generateTexture('shrine_gate', 320, 280);
-        gate.destroy();
-
-        // Lantern
-        const lantern = this.add.graphics();
-        lantern.fillStyle(0xffa500, 0.8);
-        lantern.fillCircle(0, 0, 12);
-        lantern.lineStyle(2, 0xff6600, 1);
-        lantern.strokeCircle(0, 0, 10);
-        lantern.generateTexture('lantern', 24, 24);
-        lantern.destroy();
-    }
-
-    // -----------------------------------------------------------------
-    // WORLD BUILDERS
-    // -----------------------------------------------------------------
-    private buildSkyline(factor: number, color: number, heightScale: number)
-    {
-        const c = this.add.container(0, 0);
-        c.setScrollFactor(factor, 0);
-        c.setDepth(-50 + factor * 10);
-        const g = this.add.graphics();
-        g.fillStyle(color, 1);
-        const baseY = GAME_HEIGHT * 0.62;
-        let x = -100;
-        let i = 0;
-        while (x < GAME_WIDTH + 100)
-        {
-            const w = 40 + ((i * 37) % 60);
-            const h = (60 + ((i * 53) % 140)) * heightScale;
-            g.fillRect(x, baseY - h, w, h + 200);
-            x += w + 10 + ((i * 17) % 20);
-            i++;
-        }
-        c.add(g);
-    }
-
-    private addPlatform(def: BoxDef, color: number, capColor?: number)
-    {
-        const [cx, topY, sx, sy] = def;
-        const front = this.add.rectangle(cx, topY + sy / 2, sx, sy, color);
-        this.worldContainer.add(front);
-        if (capColor !== undefined)
-        {
-            const cap = this.add.rectangle(cx, topY - 0.06, sx + 0.06, 0.12, capColor);
-            this.worldContainer.add(cap);
-        }
-        const side = this.add.rectangle(cx + sx / 2 + 0.12, topY + sy / 2, 0.24, sy, 0x000000, 0.35);
-        this.worldContainer.add(side);
-
-        this.platforms.push({
-            minX: cx - sx / 2, maxX: cx + sx / 2,
-            top: topY,
-        });
-    }
-
-    private addInvisibleTrigger(def: BoxDef, kind: Trigger['kind'], index: number)
-    {
-        const [cx, cy, sx, sy] = def;
-        this.triggers.push({
-            minX: cx - sx / 2, maxX: cx + sx / 2,
-            top: cy - sy / 2,
-            kind, index,
-        });
-    }
-
-    private buildWorld()
-    {
-        const ground = this.add.rectangle(0, KILL_Y + 2, 260, 20, 0x1c1430);
-        this.worldContainer.add(ground);
-
-        this.addPlatform(SPAWN, 0x4a4552, 0x6b6472);
-
-        for (const d of DANFOS) this.addPlatform(d, 0xe8b420, 0xc98d12);
-
-        this.addPlatform(CONTAINERS[0], 0x8a3b1e, 0xa8512c);
-        this.addPlatform(CONTAINERS[1], 0x274c77, 0x3a6ea5);
-
-        this.addPlatform(MARKET[0], 0x7a5230, 0x96683c);
-        this.addPlatform(MARKET[1], 0x6b4423, 0x8a5a2e);
-
-        this.addPlatform(SHRINE, 0x514a63, 0xe5a93c);
-
-        CHECKPOINTS.forEach((cp, i) =>
-        {
-            const [x, top] = cp.pos;
-            const plinth = this.add.rectangle(x + 1.6, top + 0.35, 0.9, 0.7, 0x8d8794);
-            this.worldContainer.add(plinth);
-            const orb = this.add.circle(x + 1.6, top + 0.9, 0.16, 0xe5a93c);
-            this.worldContainer.add(orb);
-            this.addInvisibleTrigger(cp.trigger, 'checkpoint', i);
-        });
-
-        ENEMY_PATROLS.forEach((patrol, i) =>
-        {
-            this.addInvisibleTrigger(patrol, 'enemy', i);
-        });
-
-        this.addInvisibleTrigger(SHRINE_TRIGGER, 'shrine', 0);
-    }
-
-    private buildPlayer()
-    {
-        this.playerSprite = this.add.container(0, 0);
-        this.playerBody = this.add.sprite(0, 0, 'kolade_idle');
-        this.playerBody.setOrigin(0.5, 1);
-        this.playerSprite.add(this.playerBody);
-        this.worldContainer.add(this.playerSprite);
-    }
-
-    private buildEnemies()
-    {
-        ENEMY_START_POSITIONS.forEach((startX, i) =>
-        {
-            const patrol = ENEMY_PATROLS[i];
-            const enemy: Enemy = {
-                x: startX,
-                y: patrol[1] - PLAYER_HEIGHT / 2,
-                dir: 1,
-                hp: 100,
-                state: 'patrol',
-                patrolIndex: i,
-                sprite: this.add.container(startX, patrol[1] - PLAYER_HEIGHT / 2),
-                body: this.add.rectangle(0, 0, 0.84, 1.3, 0x8f1d1d),
-                head: this.add.circle(0, -0.75, 0.3, 0x520b0b),
-            };
-
-            // Replace rectangles with sprites
-            enemy.sprite.removeAll(true);
-            const enemySprite = this.add.sprite(0, 0, 'enemy_patrol');
-            enemySprite.setOrigin(0.5, 1);
-            enemy.sprite.add(enemySprite);
-
-            this.worldContainer.add(enemy.sprite);
-            this.enemies.push(enemy);
-        });
-    }
-
-    private buildNPCs()
-    {
-        const npcPositions = [
-            { x: 39, y: -1.5, type: 'trader' },
-            { x: 42, y: -1.5, type: 'commuter' },
-            { x: 46, y: -2, type: 'elder' },
-        ];
-
-        npcPositions.forEach(pos =>
-        {
-            const npc: NPC = {
-                x: pos.x,
-                y: pos.y,
-                bobPhase: Math.random() * Math.PI * 2,
-                sprite: this.add.container(pos.x, pos.y),
-            };
-
-            const npcSprite = this.add.sprite(0, 0, `npc_${pos.type}`);
-            npcSprite.setOrigin(0.5, 1);
-            npc.sprite.add(npcSprite);
-
-            this.worldContainer.add(npc.sprite);
-            this.npcs.push(npc);
-        });
-    }
-
-    private buildShrine()
-    {
-        const gateSprite = this.add.image(54, -2, 'shrine_gate');
-        gateSprite.setOrigin(0.5, 1);
-        gateSprite.setAlpha(0.9);
-        this.worldContainer.add(gateSprite);
-
-        this.shrineGlow = this.add.image(54, -2, 'fx_glow');
-        this.shrineGlow.setScale(2.6, 3.6).setAlpha(0.35).setTint(0xffd874);
-        this.worldContainer.add(this.shrineGlow);
-        this.physics.add.existing(this.shrineGlow);
-        (this.shrineGlow.body as Phaser.Physics.Arcade.Body)?.setAllowGravity(false);
-
-        // Add lanterns
-        for (let i = 0; i < 3; i++)
-        {
-            const lantern = this.add.image(52 + i * 2, -3.5, 'lantern');
-            lantern.setAlpha(0.7 + Math.random() * 0.3);
-            this.worldContainer.add(lantern);
-        }
-    }
-
-    private buildAura()
-    {
-        this.aura = this.add.particles(0, 0, 'fx_glow', {
-            speed: { min: 20, max: 80 },
-            angle: { min: 240, max: 300 },
-            scale: { start: 0.3, end: 0 },
-            alpha: { start: 0.95, end: 0 },
-            lifespan: { min: 600, max: 1200 },
-            gravityY: -40,
-            emitting: false,
-        });
-        this.aura.setBlendMode(BlendModes.ADD);
-        this.worldContainer.add(this.aura);
-    }
-
-    // -----------------------------------------------------------------
-    // GAME FLOW
-    // -----------------------------------------------------------------
-    private beginLevel(fromCheckpoint: boolean)
-    {
-        this.sound.stopAll();
-        const cp = fromCheckpoint ? GameManager.getCheckpoint() : null;
-        if (cp)
-        {
-            this.px = cp.x;
-            this.py = cp.y - 0.2;
-        }
-        else
-        {
-            this.px = 0;
-            this.py = -0.2;
-        }
-        this.vx = 0; this.vy = 0;
-        this.hp = PLAYER_MAX_HP;
-        this.lastHpEmit = -1;
-        this.powerActive = false;
-        this.powerTimer = 0;
-        this.powerCooldown = 0;
-        this.powerFired = false;
-        this.attackCooldown = 0;
-        this.isAttacking = false;
-        this.attackType = null;
-        this.inputEnabled = false;
-        this.introDone = false;
-        this.introT = 0;
-        this.phase = 'INTRO';
-
-        // Reset enemies
-        this.enemies.forEach((enemy, i) =>
-        {
-            const patrol = ENEMY_PATROLS[i];
-            enemy.x = ENEMY_START_POSITIONS[i];
-            enemy.y = patrol[1] - PLAYER_HEIGHT / 2;
-            enemy.dir = 1;
-            enemy.hp = 100;
-            enemy.state = 'patrol';
-            enemy.sprite.setVisible(true);
-            enemy.sprite.setAlpha(1);
-        });
-
-        this.aura.start();
-        EventBus.emit(EV.PHASE_CHANGED, 'INTRO' as Phase);
-        EventBus.emit(EV.HEALTH_STATE, { hp: this.hp, maxHp: PLAYER_MAX_HP });
-        this.safePlay('sfx_powerup', 0.6);
-    }
-
-    private finishIntro()
-    {
-        if (this.introDone || this.phase !== 'INTRO') return;
-        this.introDone = true;
-        this.phase = 'PLAYING';
-        this.aura.stop();
-        EventBus.emit(EV.PHASE_CHANGED, 'PLAYING' as Phase);
-        EventBus.emit(EV.BANNER, 'Harness the power, Reach the gate');
-        this.time.delayedCall(1500, () =>
-        {
-            if (this.phase === 'PLAYING')
-            {
-                this.inputEnabled = true;
-                EventBus.emit(EV.BANNER, '');
-            }
-        });
-    }
-
-    private die(reason: DeathReason)
-    {
-        if (this.phase !== 'PLAYING') return;
-        this.phase = 'LOSS';
-        this.deathReason = reason;
-        this.inputEnabled = false;
-        this.aura.stop();
-        EventBus.emit(EV.DEATH_REASON, reason);
-        EventBus.emit(EV.PHASE_CHANGED, 'LOSS' as Phase);
-        this.safePlay('sfx_gameover', 0.8);
-    }
-
-    private win()
-    {
-        if (this.phase !== 'PLAYING') return;
-        this.phase = 'WIN';
-        this.inputEnabled = false;
-        this.aura.stop();
-        EventBus.emit(EV.PHASE_CHANGED, 'WIN' as Phase);
-        this.safePlay('sfx_win', 0.9);
-    }
-
-    private safePlay(key: string, vol = 0.7)
-    {
-        if (this.cache.audio.exists(key)) this.sound.play(key, { volume: vol });
-    }
-
-    private performAttack(type: 'punch' | 'surge')
-    {
-        if (this.attackCooldown > 0) return;
-
-        this.isAttacking = true;
-        this.attackType = type;
-        this.attackTimer = type === 'punch' ? 0.3 : 0.5;
-        this.attackCooldown = type === 'punch' ? 0.5 : 1.2;
-
-        this.playerBody.setTexture(type === 'punch' ? 'kolade_punch' : 'kolade_surge');
-        this.playerBody.setOrigin(0.5, 1);
-
-        // Check for enemy hits
-        this.enemies.forEach(enemy =>
-        {
-            if (enemy.state === 'defeated') return;
-
-            const dx = enemy.x - this.px;
-            const dy = enemy.y - this.py;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-
-            if (dist < ATTACK_RANGE && Math.sign(dx) === this.facing)
-            {
-                const damage = type === 'surge' ? SURGE_DAMAGE : ATTACK_DAMAGE;
-                enemy.hp -= damage;
-                enemy.state = 'hurt';
-                enemy.sprite.setAlpha(0.6);
-                this.safePlay('sfx_hit', 0.7);
-
-                // Knockback
-                enemy.x += this.facing * 0.5;
-
-                if (enemy.hp <= 0)
-                {
-                    enemy.state = 'defeated';
-                    this.tweens.add({
-                        targets: enemy.sprite,
-                        alpha: 0,
-                        duration: 800,
-                        onComplete: () => enemy.sprite.setVisible(false),
-                    });
-                }
-            }
-        });
-    }
-
-    // -----------------------------------------------------------------
-    // PER-FRAME
-    // -----------------------------------------------------------------
-    update (time: number, delta: number)
-    {
-        const dt = Math.min(delta / 1000, 0.05);
-        if (this.paused) return;
-        const t = time / 1000;
-
-        // Shrine glow pulse
-        if (this.shrineGlow)
-        {
-            this.shrineGlow.setAlpha(0.28 + Math.sin(t * 2.4) * 0.14);
-        }
-
-        // NPC bobbing
-        this.npcs.forEach(npc =>
-        {
-            npc.bobPhase += dt * 2;
-            const bob = Math.sin(npc.bobPhase) * 0.05;
-            npc.sprite.y = npc.y + bob;
-        });
-
-        if (this.phase === 'INTRO')
-        {
-            this.introT += dt;
-            const k = Math.min(this.introT / 10, 1);
-            const e = 1 - Math.pow(1 - k, 3);
-            const cx = 2.2 + (this.px - 2.2) * e;
-            const cy = -2.1 + (this.py - 1 - (-2.1)) * e;
-            this.cameras.main.scrollX = cx - GAME_WIDTH / 2 / 40;
-            this.cameras.main.scrollY = cy + GAME_HEIGHT / 2 / 40;
-            if (k >= 1) this.finishIntro();
-        }
-        else if (this.phase === 'PLAYING')
-        {
-            this.updatePlayer(dt);
-            this.updateEnemies(dt);
-            this.updateCamera();
-        }
-        else if (this.phase === 'MENU')
-        {
-            this.menuT += dt;
-            const a = this.menuT * 0.12;
-            this.cameras.main.scrollX = 27 + Math.cos(a) * 30 - GAME_WIDTH / 2 / 40;
-            this.cameras.main.scrollY = -9 - Math.sin(a * 0.7) * 2 + GAME_HEIGHT / 2 / 40;
-        }
-
-        // Visual sync
-        this.playerSprite.x = this.px;
-        this.playerSprite.y = this.py;
-        this.aura.x = this.px;
-        this.aura.y = this.py;
-    }
-
-    private updatePlayer(dt: number)
-    {
-        // Attack timer
-        if (this.attackTimer > 0)
-        {
-            this.attackTimer -= dt;
-            if (this.attackTimer <= 0)
-            {
-                this.isAttacking = false;
-                this.attackType = null;
-                this.playerBody.setTexture('kolade_idle');
-            }
-        }
-
-        // Attack cooldown
-        if (this.attackCooldown > 0)
-        {
-            this.attackCooldown -= dt;
-        }
-
-        // Combat input (J = punch, K = surge)
-        if (this.inputEnabled && !this.isAttacking)
-        {
-            if (this.keys.J?.isDown || this.keys.Z?.isDown)
-            {
-                this.performAttack('punch');
-            }
-            else if (this.keys.K?.isDown || this.keys.X?.isDown)
-            {
-                this.performAttack('surge');
-            }
-        }
-
-        // Power (Ogun's Iron Surge)
-        if (this.keys.F?.isDown || this.keys.SHIFT?.isDown || this.keys.E?.isDown)
-        {
-            if (!this.powerFired && this.inputEnabled && this.powerCooldown <= 0 && !this.powerActive)
-            {
-                this.powerActive = true;
-                this.powerTimer = POWER_DURATION;
-                this.powerCooldown = POWER_COOLDOWN;
-                this.aura.start();
-                this.safePlay('sfx_powerup', 0.8);
-            }
-            this.powerFired = true;
-        }
-        else
-        {
-            this.powerFired = false;
-        }
-        if (this.powerActive)
-        {
-            this.powerTimer -= dt;
-            if (this.powerTimer <= 0)
-            {
-                this.powerActive = false;
-                this.aura.stop();
-            }
-        }
-        if (this.powerCooldown > 0) this.powerCooldown -= dt;
-
-        // Power state -> React HUD
-        const pct = this.powerActive
-            ? Math.max(0, Math.min(100, (this.powerTimer / POWER_DURATION) * 100))
-            : this.powerCooldown > 0
-                ? Math.max(0, Math.min(100, (1 - this.powerCooldown / POWER_COOLDOWN) * 100))
-                : 100;
-        const rounded = Math.round(pct / 5) * 5;
-        if (rounded !== this.lastPowerEmit)
-        {
-            this.lastPowerEmit = rounded;
-            EventBus.emit(EV.POWER_STATE, { active: this.powerActive, pct });
-        }
-
-        // Health state -> React HUD
-        const hpRounded = Math.round(this.hp / 10) * 10;
-        if (hpRounded !== this.lastHpEmit)
-        {
-            this.lastHpEmit = hpRounded;
-            EventBus.emit(EV.HEALTH_STATE, { hp: this.hp, maxHp: PLAYER_MAX_HP });
-        }
-
-        // Movement input (WASD + Arrow keys)
-        let ix = 0;
-        if (this.inputEnabled)
-        {
-            if (this.keys.A?.isDown || this.keys.ARROW_LEFT?.isDown) ix -= 1;
-            if (this.keys.D?.isDown || this.keys.ARROW_RIGHT?.isDown) ix += 1;
-        }
-        if (ix !== 0) this.facing = ix;
-
-        const speed = PLAYER_SPEED * (this.powerActive ? POWER_SPEED_MULT : 1);
-        const accel = 14;
-        this.vx += (ix * speed - this.vx) * Math.min(accel * dt, 1);
-
-        // Jump (SPACE, W, or ARROW_UP)
-        if (this.inputEnabled && (this.keys.SPACE?.isDown || this.keys.W?.isDown || this.keys.ARROW_UP?.isDown) && this.onGround)
-        {
-            this.vy = -JUMP_VELOCITY;
-            this.onGround = false;
-            this.safePlay('sfx_jump', 0.6);
-        }
-
-        // Gravity + integrate
-        this.vy += GRAVITY * dt;
-        this.px += this.vx * dt;
-        this.py += this.vy * dt;
-
-        // World bounds
-        this.px = Math.max(WORLD_MIN_X, Math.min(WORLD_MAX_X, this.px));
-
-        // Platform resolution
-        this.onGround = false;
-        for (const p of this.platforms)
-        {
-            if (this.px > p.minX - PLAYER_HALF && this.px < p.maxX + PLAYER_HALF)
-            {
-                const feet = this.py;
-                if (this.vy >= 0 && feet >= p.top - 0.05 && feet <= p.top + 0.7)
-                {
-                    this.py = p.top;
-                    this.vy = 0;
-                    this.onGround = true;
-                }
-            }
-        }
-
-        // Kill plane
-        if (this.py > KILL_Y)
-        {
-            this.die('FELL_INTO_PIT');
-            return;
-        }
-
-        // Animation state — manual texture cycling (no Phaser anims).
-        if (!this.isAttacking)
-        {
-            if (Math.abs(this.vx) > 0.5 && this.onGround)
-            {
-                const frame = Math.floor(this.time.now / 110) % 4;
-                const key = 'kolade_run_' + frame;
-                if (this.lastAnimState !== 'run' || (this.playerBody.texture && this.playerBody.texture.key !== key))
-                {
-                    this.playerBody.setTexture(key);
-                    this.lastAnimState = 'run';
-                }
-            }
-            else if (this.lastAnimState !== 'idle')
-            {
-                this.playerBody.setTexture('kolade_idle');
-                this.lastAnimState = 'idle';
-            }
-        }
-
-        // Trigger zones
-        for (const tr of this.triggers)
-        {
-            if (this.px > tr.minX && this.px < tr.maxX &&
-                this.py > tr.top - 0.5 && this.py < tr.top + 4)
-            {
-                if (tr.kind === 'checkpoint')
-                {
-                    const cp = CHECKPOINTS[tr.index];
-                    GameManager.setCheckpoint({ x: cp.pos[0], y: cp.pos[1] });
-                    EventBus.emit(EV.CHECKPOINT, tr.index);
-                    this.time.delayedCall(1500, () =>
-                    {
-                        if (this.phase === 'PLAYING') EventBus.emit(EV.CHECKPOINT, -1);
-                    });
-                    tr.kind = 'checkpoint-done';
-                }
-                else if (tr.kind === 'enemy')
-                {
-                    // Check if any enemy in this patrol zone is still alive
-                    const enemyInZone = this.enemies.find(e => e.patrolIndex === tr.index && e.state !== 'defeated');
-                    if (enemyInZone)
-                    {
-                        if (this.powerActive)
-                        {
-                            enemyInZone.state = 'defeated';
-                            this.tweens.add({
-                                targets: enemyInZone.sprite,
-                                alpha: 0,
-                                duration: 800,
-                                onComplete: () => enemyInZone.sprite.setVisible(false),
-                            });
-                        }
-                        else
-                        {
-                            this.hp -= 20;
-                            if (this.hp <= 0)
-                            {
-                                this.die('CAUGHT_BY_ENEMY');
-                                return;
-                            }
-                        }
-                    }
-                }
-                else if (tr.kind === 'shrine')
-                {
-                    this.win();
-                    return;
-                }
-            }
-        }
-    }
-
-    private updateEnemies(dt: number)
-    {
-        this.enemies.forEach(enemy =>
-        {
-            if (enemy.state === 'defeated') return;
-
-            const patrol = ENEMY_PATROLS[enemy.patrolIndex];
-            const dx = this.px - enemy.x;
-            const dist = Math.abs(dx);
-            const chasing = dist < ENEMY_CHASE_RANGE && Math.abs(this.py - patrol[1]) < 2;
-
-            if (chasing && enemy.state !== 'hurt')
-            {
-                enemy.state = 'chase';
-                const spd = 3.2;
-                enemy.x += Math.sign(dx) * spd * dt;
-            }
-            else if (!chasing && enemy.state !== 'hurt')
-            {
-                enemy.state = 'patrol';
-                const spd = 1.6;
-                enemy.x += enemy.dir * spd * dt;
-                if (Math.abs(enemy.x - ENEMY_START_POSITIONS[enemy.patrolIndex]) > 2.6)
-                {
-                    enemy.dir *= -1;
-                }
-            }
-
-            if (enemy.state === 'hurt')
-            {
-                enemy.sprite.setAlpha(0.6);
-                this.time.delayedCall(200, () =>
-                {
-                    if (enemy.state === 'hurt')
-                    {
-                        enemy.state = 'patrol';
-                        enemy.sprite.setAlpha(1);
-                    }
-                });
-            }
-
-            enemy.y = patrol[1] - PLAYER_HEIGHT / 2 - 0.1;
-            enemy.sprite.x = enemy.x;
-            enemy.sprite.y = enemy.y;
-
-            // Update enemy sprite texture based on state
-            const enemySprite = enemy.sprite.list[0] as Phaser.GameObjects.Sprite;
-            if (enemySprite && enemySprite.texture)
-            {
-                const textureKey = enemy.state === 'chase' ? 'enemy_chase' :
-                                   enemy.state === 'hurt' ? 'enemy_hurt' :
-                                   'enemy_patrol';
-                if (enemySprite.texture.key !== textureKey)
-                {
-                    enemySprite.setTexture(textureKey);
-                }
-            }
-        });
-    }
-
-    private updateCamera()
-    {
-        const targetX = this.px - GAME_WIDTH / 2 / 40;
-        const targetY = this.py + GAME_HEIGHT / 2 / 40 - 40;
-        this.cameras.main.scrollX += (targetX - this.cameras.main.scrollX) * 0.1;
-        this.cameras.main.scrollY += (targetY - this.cameras.main.scrollY) * 0.1;
-    }
+function drawStickman(g: Phaser.GameObjects.Graphics, x: number, y: number, s: number, frame: number, mode: 'run' | 'jump' | 'slide' | 'idle', color: number, headband: number, isEnemy: boolean) {
+  g.lineStyle(Math.max(2, 4 * s), color, 1)
+  const h = 55 * s, bw = 18 * s
+  const headR = 9 * s
+  let legA = 0, legB = 0, armA = 0, armB = 0, bodyLean = 0, headY = -h
+  if (mode === 'run') {
+    const t = frame * 0.18
+    legA = Math.sin(t) * 0.7; legB = Math.sin(t + Math.PI) * 0.7
+    armA = Math.sin(t + Math.PI) * 0.5; armB = Math.sin(t) * 0.5
+    bodyLean = isEnemy ? -0.25 : -0.1
+    headY = -h + Math.abs(Math.sin(t)) * 3 * s
+  } else if (mode === 'jump') {
+    legA = -0.8; legB = -0.4; armA = 0.8; armB = 0.6
+    bodyLean = -0.15; headY = -h - 8 * s
+  } else if (mode === 'slide') {
+    legA = 1.2; legB = 1.0; armA = -0.3; armB = -0.5
+    bodyLean = 0.6; headY = -h * 0.45
+  }
+  const hipX = x, hipY = y - h * 0.38
+  const shX = hipX + Math.sin(bodyLean) * h * 0.35, shY = hipY - h * 0.35
+  const hx = shX + Math.sin(bodyLean) * headR * 1.5, hy = shY + headY + h * 0.35
+  g.fillStyle(color, 1); g.fillCircle(hx, hy, headR)
+  if (isEnemy) {
+    g.fillStyle(0xff2200, 1)
+    g.fillCircle(hx - headR * 0.35, hy - headR * 0.1, headR * 0.22)
+    g.fillCircle(hx + headR * 0.35, hy - headR * 0.1, headR * 0.22)
+    g.lineStyle(Math.max(1, 3 * s), 0xff4400, 1)
+    g.beginPath(); g.moveTo(hx - headR * 0.6, hy - headR); g.lineTo(hx - headR * 1.1, hy - headR * 1.6)
+    g.moveTo(hx + headR * 0.6, hy - headR); g.lineTo(hx + headR * 1.1, hy - headR * 1.6); g.strokePath()
+  } else if (headband > 0) {
+    g.fillStyle(headband, 1)
+    g.fillRect(hx - headR, hy - headR * 0.3, headR * 2, headR * 0.5)
+    const ribbonX = hx - headR * 1.2 - Math.sin(frame * 0.12) * 4 * s
+    g.lineStyle(Math.max(1, 2 * s), headband, 1)
+    g.beginPath(); g.moveTo(hx - headR, hy - headR * 0.1); g.lineTo(ribbonX, hy + headR * 0.4); g.strokePath()
+  }
+  g.lineStyle(Math.max(2, 4 * s), color, 1)
+  g.beginPath(); g.moveTo(shX, shY); g.lineTo(hipX, hipY); g.strokePath()
+  const legLen = h * 0.38
+  g.beginPath()
+  g.moveTo(hipX, hipY); g.lineTo(hipX + Math.sin(legA) * legLen, hipY + Math.cos(legA) * legLen)
+  g.moveTo(hipX, hipY); g.lineTo(hipX + Math.sin(legB) * legLen, hipY + Math.cos(legB) * legLen)
+  g.strokePath()
+  const armLen = h * 0.32
+  g.beginPath()
+  g.moveTo(shX, shY); g.lineTo(shX + Math.sin(armA) * armLen, shY + Math.cos(armA) * armLen * 0.7)
+  g.moveTo(shX, shY); g.lineTo(shX + Math.sin(armB) * armLen, shY + Math.cos(armB) * armLen * 0.7)
+  g.strokePath()
+  if (isEnemy) {
+    g.lineStyle(Math.max(1, 2 * s), 0xff6600, 1)
+    g.beginPath()
+    g.moveTo(shX + Math.sin(armA) * armLen, shY + Math.cos(armA) * armLen * 0.7)
+    g.lineTo(shX + Math.sin(armA) * armLen * 1.3, shY + Math.cos(armA) * armLen * 0.7 - 4 * s)
+    g.moveTo(shX + Math.sin(armB) * armLen, shY + Math.cos(armB) * armLen * 0.7)
+    g.lineTo(shX + Math.sin(armB) * armLen * 1.3, shY + Math.cos(armB) * armLen * 0.7 - 4 * s)
+    g.strokePath()
+  }
 }
 
-export default StartGame;
+function drawTrackSeg(g: Phaser.GameObjects.Graphics, zNear: number, zFar: number, curve: number) {
+  const wNear = LANE_W * 3 * proj(0, zNear).s
+  const wFar = LANE_W * 3 * proj(0, zFar).s
+  const pN = proj(curve * zNear * 0.003, zNear)
+  const pF = proj(curve * zFar * 0.003, zFar)
+  g.fillStyle(0x8b6914, 1)
+  g.beginPath()
+  g.moveTo(pN.x - wNear / 2, pN.y)
+  g.lineTo(pN.x + wNear / 2, pN.y)
+  g.lineTo(pF.x + wFar / 2, pF.y)
+  g.lineTo(pF.x - wFar / 2, pF.y)
+  g.closePath()
+  g.fillPath()
+  g.fillStyle(0xa07818, 1)
+  const capH = Math.max(2, 6 * pN.s)
+  g.fillRect(pN.x - wNear / 2, pN.y - capH, wNear, capH)
+  g.lineStyle(1, 0x5a4010, 0.6)
+  for (let li = -1; li <= 1; li += 2) {
+    const ln = proj(li * LANE_W, zNear), lf = proj(li * LANE_W, zFar)
+    g.beginPath(); g.moveTo(ln.x, ln.y); g.lineTo(lf.x, lf.y); g.strokePath()
+  }
+  const pillarH = 80 * pF.s
+  for (const side of [-1, 1]) {
+    const px = pF.x + side * (wFar / 2 + 20 * pF.s)
+    g.fillStyle(0x6b4e12, 1)
+    g.fillRect(px - 8 * pF.s, pF.y - pillarH, 16 * pF.s, pillarH)
+    g.fillStyle(0xd4a017, 1)
+    g.fillRect(px - 12 * pF.s, pF.y - pillarH - 10 * pF.s, 24 * pF.s, 10 * pF.s)
+    if (Math.floor(zFar / 200) % 2 === 0) {
+      g.fillStyle(0xff6600, 0.8 + Math.sin(Date.now() * 0.005) * 0.2)
+      g.fillCircle(px, pF.y - pillarH - 14 * pF.s, 6 * pF.s)
+    }
+  }
+}
+
+export class Game extends Scene {
+  private phase: Phase = 'MENU'
+  private frame = 0
+  private distance = 0
+  private coins = 0
+  private speed = 6
+  private baseSpeed = 6
+  private lane = 1
+  private targetLaneX = 0
+  private playerX = 0
+  private playerYOff = 0
+  private playerMode: 'run' | 'jump' | 'slide' | 'idle' = 'run'
+  private jumpV = 0
+  private jumping = false
+  private sliding = false
+  private slideTimer = 0
+  private stumbleTimer = 0
+  private chaserZ = 180
+  private obstacles: Obstacle[] = []
+  private coinItems: Coin[] = []
+  private powerups: Powerup[] = []
+  private magnetTimer = 0
+  private shieldActive = false
+  private boostTimer = 0
+  private trackG!: Phaser.GameObjects.Graphics
+  private playerG!: Phaser.GameObjects.Graphics
+  private enemyG!: Phaser.GameObjects.Graphics
+  private bgG!: Phaser.GameObjects.Graphics
+  private curve = 0
+  private spawnTimer = 0
+  private countdownVal = 3
+  private countdownTimer: Phaser.Time.TimerEvent | null = null
+  private keys!: Record<string, Phaser.Input.Keyboard.Key>
+  private touchStartX = 0
+  private touchStartY = 0
+  private pointerDown = false
+
+  constructor() { super('Game') }
+
+  preload() {
+    const a = (k: string, p: string) => { if (!this.cache.audio.exists(k)) this.load.audio(k, p) }
+    a('sfx_jump', 'assets/audio/sfx_jump.mp3')
+    a('sfx_collect', 'assets/audio/sfx_collect.mp3')
+    a('sfx_hit', 'assets/audio/sfx_hit.mp3')
+    a('sfx_powerup', 'assets/audio/sfx_powerup.mp3')
+    a('sfx_gameover', 'assets/audio/sfx_gameover.mp3')
+    a('bgm_action', 'assets/audio/bgm_action.mp3')
+  }
+
+  create() {
+    this.bgG = this.add.graphics().setDepth(0)
+    this.trackG = this.add.graphics().setDepth(1)
+    this.enemyG = this.add.graphics().setDepth(3)
+    this.playerG = this.add.graphics().setDepth(4)
+    this.drawBackground()
+    this.keys = this.input.keyboard!.addKeys('A,D,W,S,SPACE,UP,DOWN,LEFT,RIGHT,ESC') as Record<string, Phaser.Input.Keyboard.Key>
+    this.input.keyboard!.on('keydown-ESC', () => { if (this.phase === 'PLAYING') this.setPaused(); else if (this.phase === 'PAUSED') this.setPlaying() })
+    this.input.on('pointerdown', (p: Phaser.Input.Pointer) => { this.touchStartX = p.x; this.touchStartY = p.y; this.pointerDown = true })
+    this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (!this.pointerDown) return; this.pointerDown = false
+      const dx = p.x - this.touchStartX, dy = p.y - this.touchStartY
+      if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) this.laneAction(dx > 0 ? 'right' : 'left')
+      else if (dy < -40) this.laneAction('jump')
+      else if (dy > 40) this.laneAction('slide')
+    })
+    EventBus.on('start-game', this.startGame, this)
+    EventBus.on('pause', this.setPaused, this)
+    EventBus.on('resume', this.setPlaying, this)
+    EventBus.on('back-to-menu', this.toMenu, this)
+    EventBus.on('lane-action', this.laneAction, this)
+    this.events.once('shutdown', () => {
+      EventBus.off('start-game', this.startGame, this)
+      EventBus.off('pause', this.setPaused, this)
+      EventBus.off('resume', this.setPlaying, this)
+      EventBus.off('back-to-menu', this.toMenu, this)
+      EventBus.off('lane-action', this.laneAction, this)
+    })
+    this.setMenu()
+    EventBus.emit('current-scene-ready', this)
+  }
+
+  private setMenu() { this.phase = 'MENU'; EventBus.emit('phase-changed', 'MENU') }
+  private toMenu() { this.clearAll(); this.setMenu() }
+
+  private startGame() {
+    this.clearAll()
+    this.distance = 0; this.coins = 0; this.speed = this.baseSpeed
+    this.lane = 1; this.playerX = 0; this.targetLaneX = 0
+    this.playerYOff = 0; this.playerMode = 'run'; this.jumping = false; this.sliding = false
+    this.slideTimer = 0; this.stumbleTimer = 0; this.chaserZ = 180
+    this.magnetTimer = 0; this.shieldActive = false; this.boostTimer = 0
+    this.curve = 0; this.spawnTimer = 0
+    this.phase = 'COUNTDOWN'; this.countdownVal = 3
+    EventBus.emit('phase-changed', 'COUNTDOWN')
+    if (this.countdownTimer) this.countdownTimer.remove()
+    this.countdownTimer = this.time.addEvent({
+      delay: 900, callback: () => {
+        this.countdownVal--
+        EventBus.emit('countdown-tick', this.countdownVal)
+        if (this.countdownVal <= 0) { this.setPlaying() }
+      }, repeat: 2
+    })
+  }
+
+  private setPlaying() {
+    if (this.phase === 'PAUSED') { EventBus.emit('phase-changed', 'PLAYING'); this.phase = 'PLAYING'; return }
+    this.phase = 'PLAYING'; EventBus.emit('phase-changed', 'PLAYING')
+    this.safePlay('bgm_action', true)
+  }
+
+  private setPaused() {
+    if (this.phase !== 'PLAYING') return
+    this.phase = 'PAUSED'; EventBus.emit('phase-changed', 'PAUSED')
+    this.sound.pauseAll()
+  }
+
+  private setLoss() {
+    this.phase = 'LOSS'; EventBus.emit('phase-changed', 'LOSS')
+    this.safePlay('sfx_gameover')
+    this.sound.stopAll()
+    const total = Math.floor(this.distance) + this.coins * 10
+    const best = parseInt(localStorage.getItem('temple_best') || '0')
+    if (total > best) localStorage.setItem('temple_best', String(total))
+    EventBus.emit('score-update', { score: total, coins: this.coins, distance: Math.floor(this.distance), multiplier: 1 })
+  }
+
+  private clearAll() {
+    this.obstacles.forEach(o => o.sprite.destroy()); this.obstacles = []
+    this.coinItems.forEach(c => c.sprite.destroy()); this.coinItems = []
+    this.powerups.forEach(p => p.sprite.destroy()); this.powerups = []
+    this.sound.stopAll()
+  }
+
+  private laneAction(dir: string) {
+    if (this.phase !== 'PLAYING') return
+    if (dir === 'left' && this.lane > 0) this.lane--
+    else if (dir === 'right' && this.lane < 2) this.lane++
+    else if (dir === 'jump' && !this.jumping && !this.sliding) {
+      this.jumping = true; this.jumpV = -13; this.playerMode = 'jump'; this.safePlay('sfx_jump')
+    } else if (dir === 'slide' && !this.jumping) {
+      this.sliding = true; this.slideTimer = 38; this.playerMode = 'slide'
+    }
+    this.targetLaneX = (this.lane - 1) * LANE_W
+  }
+
+  private safePlay(key: string, loop = false) {
+    if (!this.cache.audio.exists(key)) return
+    const existing = this.sound.get(key) as Phaser.Sound.WebAudioSound | null
+    if (existing && existing.isPlaying) return
+    this.sound.play(key, { loop, volume: loop ? 0.35 : 0.7 })
+  }
+
+  private drawBackground() {
+    const g = this.bgG; g.clear()
+    g.fillGradientStyle(0x0d0520, 0x0d0520, 0x3a1500, 0x3a1500, 1)
+    g.fillRect(0, 0, W, H)
+    g.fillStyle(0xffcc44, 0.9); g.fillCircle(W * 0.72, HORIZON_Y - 60, 38)
+    g.fillStyle(0x1a0a2e, 1)
+    for (let i = 0; i < 8; i++) {
+      const bx = i * 140 - 40, bh = 60 + (i % 3) * 40
+      g.fillTriangle(bx, HORIZON_Y, bx + 70, HORIZON_Y - bh, bx + 140, HORIZON_Y)
+    }
+    g.fillStyle(0x120820, 1)
+    for (let i = 0; i < 12; i++) {
+      const tx = i * 90 + 20
+      g.fillRect(tx, HORIZON_Y - 30 - (i % 2) * 20, 14, 30 + (i % 2) * 20)
+      g.fillCircle(tx + 7, HORIZON_Y - 34 - (i % 2) * 20, 12)
+    }
+  }
+
+  private spawnRow() {
+    const r = Math.random()
+    if (r < 0.38) {
+      const lane = Math.floor(Math.random() * 3)
+      const type = (['barrier', 'arch', 'pit'] as const)[Math.floor(Math.random() * 3)]
+      const g = this.add.graphics().setDepth(2)
+      this.obstacles.push({ lane, z: SPAWN_Z, type, alive: true, sprite: g })
+    }
+    if (r > 0.2) {
+      const lane = Math.floor(Math.random() * 3)
+      for (let i = 0; i < 3; i++) {
+        const g = this.add.graphics().setDepth(2)
+        this.coinItems.push({ lane, z: SPAWN_Z + i * 90, alive: true, sprite: g })
+      }
+    }
+    if (Math.random() < 0.08) {
+      const g = this.add.graphics().setDepth(2)
+      this.powerups.push({ lane: Math.floor(Math.random() * 3), z: SPAWN_Z, type: (['magnet', 'shield', 'boost'] as const)[Math.floor(Math.random() * 3)], alive: true, sprite: g })
+    }
+  }
+
+  private drawObstacle(o: Obstacle) {
+    const g = o.sprite; g.clear()
+    const lx = (o.lane - 1) * LANE_W + this.curve * o.z * 0.003
+    const p = proj(lx, o.z)
+    if (p.s < 0.05 || o.z < -50) return
+    const w = LANE_W * 0.85 * p.s, h = 40 * p.s
+    if (o.type === 'barrier') {
+      g.fillStyle(0x7a5230, 1); g.fillRect(p.x - w / 2, p.y - h, w, h)
+      g.fillStyle(0x9a6a40, 1); g.fillRect(p.x - w / 2, p.y - h, w, 6 * p.s)
+      g.fillStyle(0x5a3a1a, 1); g.fillRect(p.x - w / 2 + 4 * p.s, p.y - h + 10 * p.s, w - 8 * p.s, h - 16 * p.s)
+    } else if (o.type === 'arch') {
+      const ah = 90 * p.s
+      g.fillStyle(0x6b4e2a, 1)
+      g.fillRect(p.x - w / 2, p.y - ah, 10 * p.s, ah)
+      g.fillRect(p.x + w / 2 - 10 * p.s, p.y - ah, 10 * p.s, ah)
+      g.fillRect(p.x - w / 2, p.y - ah, w, 22 * p.s)
+      g.fillStyle(0xff5500, 0.8 + Math.sin(Date.now() * 0.008) * 0.2)
+      g.fillCircle(p.x, p.y - ah + 11 * p.s, 8 * p.s)
+    } else {
+      g.fillStyle(0x050308, 1); g.fillRect(p.x - w / 2, p.y - 8 * p.s, w, 10 * p.s)
+      g.lineStyle(2 * p.s, 0x3a2510, 1)
+      g.strokeRect(p.x - w / 2, p.y - 8 * p.s, w, 10 * p.s)
+    }
+  }
+
+  private drawCoin(c: Coin) {
+    const g = c.sprite; g.clear()
+    const lx = (c.lane - 1) * LANE_W + this.curve * c.z * 0.003
+    const p = proj(lx, c.z)
+    if (p.s < 0.05) return
+    const r = 11 * p.s
+    const bob = Math.sin(Date.now() * 0.004 + c.z) * 4 * p.s
+    g.fillStyle(0xffd700, 1); g.fillCircle(p.x, p.y - 28 * p.s + bob, r)
+    g.fillStyle(0xffec80, 1); g.fillCircle(p.x - r * 0.3, p.y - 28 * p.s + bob - r * 0.3, r * 0.35)
+    g.lineStyle(2 * p.s, 0xb8860b, 1); g.strokeCircle(p.x, p.y - 28 * p.s + bob, r)
+  }
+
+  private drawPowerup(pw: Powerup) {
+    const g = pw.sprite; g.clear()
+    const lx = (pw.lane - 1) * LANE_W + this.curve * pw.z * 0.003
+    const p = proj(lx, pw.z)
+    if (p.s < 0.05) return
+    const r = 16 * p.s, bob = Math.sin(Date.now() * 0.003) * 5 * p.s
+    const col = pw.type === 'magnet' ? 0xff4488 : pw.type === 'shield' ? 0x44aaff : 0x44ff88
+    g.fillStyle(col, 0.9); g.fillCircle(p.x, p.y - 34 * p.s + bob, r)
+    g.lineStyle(2 * p.s, 0xffffff, 0.8); g.strokeCircle(p.x, p.y - 34 * p.s + bob, r)
+    g.fillStyle(0xffffff, 1)
+    g.fillCircle(p.x, p.y - 34 * p.s + bob, r * 0.5)
+  }
+
+  update(time: number, delta: number) {
+    this.frame++
+    const dt = Math.min(delta / 16.67, 2)
+
+    if (this.phase === 'PLAYING') {
+      this.distance += this.speed * dt * 0.35
+      this.speed = this.baseSpeed + Math.min(4, this.distance / 600) + (this.boostTimer > 0 ? 3 : 0)
+      this.curve = Math.sin(this.distance * 0.008) * 28
+
+      if (this.keys.A.isDown || this.keys.LEFT.isDown) { if (this.lane > 0) { this.lane--; this.targetLaneX = (this.lane - 1) * LANE_W } }
+      if (this.keys.D.isDown || this.keys.RIGHT.isDown) { if (this.lane < 2) { this.lane++; this.targetLaneX = (this.lane - 1) * LANE_W } }
+      if ((this.keys.W.isDown || this.keys.UP.isDown || this.keys.SPACE.isDown) && !this.jumping && !this.sliding) {
+        this.jumping = true; this.jumpV = -13; this.playerMode = 'jump'; this.safePlay('sfx_jump')
+      }
+      if ((this.keys.S.isDown || this.keys.DOWN.isDown) && !this.jumping && !this.sliding) {
+        this.sliding = true; this.slideTimer = 38; this.playerMode = 'slide'
+      }
+
+      if (this.jumping) {
+        this.playerYOff += this.jumpV * dt; this.jumpV += 0.65 * dt
+        if (this.playerYOff >= 0) { this.playerYOff = 0; this.jumping = false; this.playerMode = 'run' }
+      }
+      if (this.sliding) {
+        this.slideTimer -= dt
+        if (this.slideTimer <= 0) { this.sliding = false; this.playerMode = 'run' }
+      }
+      if (this.stumbleTimer > 0) this.stumbleTimer -= dt
+
+      this.playerX += (this.targetLaneX - this.playerX) * 0.18 * dt
+
+      this.magnetTimer = Math.max(0, this.magnetTimer - dt)
+      this.boostTimer = Math.max(0, this.boostTimer - dt)
+
+      this.spawnTimer -= dt
+      if (this.spawnTimer <= 0) { this.spawnRow(); this.spawnTimer = Math.max(28, 70 - this.distance / 80) }
+
+      this.chaserZ += (this.stumbleTimer > 0 ? -2.5 : 0.4) * dt
+      this.chaserZ = Math.max(30, Math.min(260, this.chaserZ))
+      EventBus.emit('chaser-distance', { distanceRatio: 1 - this.chaserZ / 260 })
+
+      const pz = 0
+      for (const o of this.obstacles) {
+        if (!o.alive) continue
+        o.z -= this.speed * dt * 3
+        if (o.z < -80) { o.alive = false; o.sprite.destroy(); continue }
+        this.drawObstacle(o)
+        if (o.z < pz + 60 && o.z > pz - 20) {
+          const olx = (o.lane - 1) * LANE_W
+          if (Math.abs(olx - this.playerX) < LANE_W * 0.65) {
+            const hit = (o.type === 'barrier' && !this.jumping) || (o.type === 'arch' && !this.sliding) || (o.type === 'pit' && !this.jumping)
+            if (hit && !this.shieldActive) {
+              o.alive = false; o.sprite.destroy()
+              this.stumbleTimer = 30; this.chaserZ -= 55; this.safePlay('sfx_hit')
+              this.cameras.main.shake(120, 0.008)
+              if (this.chaserZ <= 35) { this.setLoss(); return }
+            } else if (hit && this.shieldActive) {
+              o.alive = false; o.sprite.destroy(); this.shieldActive = false
+              this.safePlay('sfx_powerup')
+            }
+          }
+        }
+      }
+      this.obstacles = this.obstacles.filter(o => o.alive)
+
+      for (const c of this.coinItems) {
+        if (!c.alive) continue
+        c.z -= this.speed * dt * 3
+        if (c.z < -80) { c.alive = false; c.sprite.destroy(); continue }
+        this.drawCoin(c)
+        const clx = (c.lane - 1) * LANE_W
+        const magnetRange = this.magnetTimer > 0 ? LANE_W * 1.6 : LANE_W * 0.6
+        if (c.z < 80 && c.z > -20 && Math.abs(clx - this.playerX) < magnetRange) {
+          c.alive = false; c.sprite.destroy(); this.coins++; this.safePlay('sfx_collect')
+        }
+      }
+      this.coinItems = this.coinItems.filter(c => c.alive)
+
+      for (const pw of this.powerups) {
+        if (!pw.alive) continue
+        pw.z -= this.speed * dt * 3
+        if (pw.z < -80) { pw.alive = false; pw.sprite.destroy(); continue }
+        this.drawPowerup(pw)
+        const plx = (pw.lane - 1) * LANE_W
+        if (pw.z < 70 && pw.z > -20 && Math.abs(plx - this.playerX) < LANE_W * 0.7) {
+          pw.alive = false; pw.sprite.destroy(); this.safePlay('sfx_powerup')
+          if (pw.type === 'magnet') this.magnetTimer = 360
+          else if (pw.type === 'shield') this.shieldActive = true
+          else this.boostTimer = 240
+          EventBus.emit('powerup-state', { magnet: this.magnetTimer, shield: this.shieldActive, boost: this.boostTimer })
+        }
+      }
+      this.powerups = this.powerups.filter(p => p.alive)
+
+      const total = Math.floor(this.distance) + this.coins * 10
+      if (this.frame % 6 === 0) EventBus.emit('score-update', { score: total, coins: this.coins, distance: Math.floor(this.distance), multiplier: this.boostTimer > 0 ? 2 : 1 })
+    }
+
+    this.trackG.clear()
+    const segCount = 22
+    for (let i = segCount - 1; i >= 0; i--) {
+      const zFar = i * 80 + (this.distance * 3 % 80)
+      const zNear = zFar - 80
+      if (zNear < -40) continue
+      drawTrackSeg(this.trackG, Math.max(0, zNear), zFar, this.curve)
+    }
+
+    this.playerG.clear()
+    if (this.phase !== 'MENU') {
+      const mode = this.stumbleTimer > 0 && this.frame % 8 < 4 ? 'idle' : this.playerMode
+      drawStickman(this.playerG, W / 2 + this.playerX * proj(0, 0).s, PLAYER_SCREEN_Y + this.playerYOff, 1.4, this.frame, mode, 0xf5deb3, 0xffd700, false)
+      if (this.shieldActive) {
+        this.playerG.lineStyle(3, 0x44aaff, 0.7)
+        this.playerG.strokeCircle(W / 2 + this.playerX, PLAYER_SCREEN_Y + this.playerYOff - 40, 50)
+      }
+    }
+
+    this.enemyG.clear()
+    if (this.phase !== 'MENU' && this.chaserZ > 0) {
+      const ep = proj(this.playerX * 0.6, this.chaserZ)
+      drawStickman(this.enemyG, ep.x, ep.y + (BOTTOM_Y - ep.y) * 0.02, ep.s * 1.5, this.frame, 'run', 0x1a1a2e, 0, true)
+    }
+  }
+}
+
+export const StartGame = (parent: string) => {
+  const game = new PhaserGame({
+    type: AUTO, width: W, height: H, parent,
+    backgroundColor: '#0d0520',
+    scale: { mode: Scale.FIT, autoCenter: Scale.CENTER_BOTH },
+    physics: { default: 'arcade', arcade: { gravity: { x: 0, y: 0 } } },
+    scene: [Game]
+  })
+  if (typeof window !== 'undefined') {
+    (window as any).__PHASER_GAME__ = game
+    ;(window as any).__PHASER_EVENT_BUS__ = EventBus
+  }
+  return game
+}

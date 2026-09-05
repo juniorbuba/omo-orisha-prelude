@@ -1,393 +1,153 @@
-// ---------------------------------------------------------------------------
-// OMO ORISHA — React shell.
-// Mounts the Phaser game into #game-container and renders ALL primary UI as
-// DOM overlays: title menu, awakening intro slides (10s total), HUD (HP bar,
-// Ogun power meter, mobile combat buttons, checkpoint toasts, banners), pause,
-// win & loss screens. Talks to the scene only through the EventBus.
-// ---------------------------------------------------------------------------
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import StartGame, { EventBus, EV, GameManager } from './game/main';
-import type { Game, Phase, DeathReason } from './game/main';
+import { useLayoutEffect, useRef, useState, useEffect } from 'react'
+import { StartGame, EventBus } from './game/main'
+import type { Game } from './game/main'
 
-export interface IRefPhaserGame
-{
-    game: Phaser.Game | null;
-    scene: Game | null;
-}
+type Phase = 'MENU' | 'COUNTDOWN' | 'PLAYING' | 'PAUSED' | 'LOSS'
 
-const INTRO_LINES = [
-    { title: 'LAGOS NEVER SLEEPS', body: 'A boy runs the city’s spine — danfo roofs, container stacks, market decks.' },
-    { title: 'THE OLD ONES REMEMBER', body: 'Ogun’s iron fire sleeps in his blood. One surge. One road.' },
-    { title: 'REACH THE SHRINE GATE', body: 'Step on every ancestor stone. Fight through the enforcers. Do not fall.' },
-];
+interface ScoreData { score: number; coins: number; distance: number; multiplier: number }
 
-function IconPlay()
-{
-    return (
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
-            <path d="M8 5v14l11-7z" />
-        </svg>
-    );
-}
-function IconResume()
-{
-    return (
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-            <path d="M4 12a8 8 0 1 1 2.6 5.9" />
-            <path d="M4 20v-5h5" />
-        </svg>
-    );
-}
-function IconPause()
-{
-    return (
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
-            <rect x="6" y="5" width="4" height="14" rx="1" />
-            <rect x="14" y="5" width="4" height="14" rx="1" />
-        </svg>
-    );
-}
-function IconSound({ muted }: { muted: boolean })
-{
-    return (
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-            <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor" stroke="none" />
-            {muted
-                ? <path d="M16 9l5 6M21 9l-5 6" />
-                : <><path d="M16.5 8.5a5 5 0 0 1 0 7" /><path d="M19 6a8.5 8.5 0 0 1 0 12" /></>}
-        </svg>
-    );
-}
+function best(): number { return parseInt(localStorage.getItem('temple_best') || '0') }
 
-function App()
-{
-    const phaserRef = useRef<IRefPhaserGame | null>(null);
+export default function App() {
+  const gameRef = useRef<ReturnType<typeof StartGame> | null>(null)
+  const sceneRef = useRef<Game | null>(null)
+  const [phase, setPhase] = useState<Phase>('MENU')
+  const [score, setScore] = useState<ScoreData>({ score: 0, coins: 0, distance: 0, multiplier: 1 })
+  const [danger, setDanger] = useState(0)
+  const [countdown, setCountdown] = useState(3)
+  const [highScore, setHighScore] = useState(best())
+  const [muted, setMuted] = useState(false)
+  const [booted, setBooted] = useState(false)
 
-    const [phase, setPhase] = useState<Phase | 'PAUSED'>('MENU');
-    const [banner, setBanner] = useState('');
-    const [checkpoint, setCheckpoint] = useState(-1);
-    const [power, setPower] = useState({ active: false, pct: 100 });
-    const [health, setHealth] = useState({ hp: 100, maxHp: 100 });
-    const [deathReason, setDeathReason] = useState<DeathReason>('FELL_INTO_PIT');
-    const [muted, setMuted] = useState(false);
-    const [hasSave, setHasSave] = useState(false);
-    const [introSlide, setIntroSlide] = useState(0);
+  useLayoutEffect(() => {
+    const g = StartGame('game-container')
+    gameRef.current = g
+    return () => { g.destroy(true); gameRef.current = null }
+  }, [])
 
-    //  Mount the Phaser game into #game-container exactly once and destroy
-    //  it on unmount. DO NOT remove this effect or the #game-container div.
-    useLayoutEffect(() =>
-    {
-        if (phaserRef.current === null)
-        {
-            const game = StartGame("game-container");
-            phaserRef.current = { game, scene: null };
-        }
+  useEffect(() => {
+    const onPhase = (p: Phase) => { setPhase(p); if (p === 'LOSS') setHighScore(best()) }
+    const onScore = (d: ScoreData) => setScore(d)
+    const onDanger = (d: { distanceRatio: number }) => setDanger(d.distanceRatio)
+    const onTick = (v: number) => setCountdown(v)
+    const onReady = (s: Game) => { sceneRef.current = s; setBooted(true) }
+    EventBus.on('phase-changed', onPhase)
+    EventBus.on('score-update', onScore)
+    EventBus.on('chaser-distance', onDanger)
+    EventBus.on('countdown-tick', onTick)
+    EventBus.on('current-scene-ready', onReady)
+    return () => {
+      EventBus.off('phase-changed', onPhase)
+      EventBus.off('score-update', onScore)
+      EventBus.off('chaser-distance', onDanger)
+      EventBus.off('countdown-tick', onTick)
+      EventBus.off('current-scene-ready', onReady)
+    }
+  }, [])
 
-        const handler = (scene: Game) =>
-        {
-            if (phaserRef.current)
-            {
-                phaserRef.current.scene = scene;
-            }
-        };
-        EventBus.on(EV.CURRENT_SCENE_READY, handler);
+  const start = () => EventBus.emit('start-game')
+  const pause = () => EventBus.emit('pause')
+  const resume = () => EventBus.emit('resume')
+  const toMenu = () => EventBus.emit('back-to-menu')
+  const lane = (d: 'left' | 'right' | 'jump' | 'slide') => EventBus.emit('lane-action', d)
+  const toggleMute = () => {
+    const g = gameRef.current
+    if (!g) return
+    g.sound.mute = !g.sound.mute
+    setMuted(g.sound.mute)
+  }
 
-        return () =>
-        {
-            EventBus.removeListener(EV.CURRENT_SCENE_READY, handler);
-            if (phaserRef.current)
-            {
-                phaserRef.current.game?.destroy(true);
-                phaserRef.current = null;
-            }
-        };
-    }, []);
+  const dangerPulse = danger > 0.7
+  const dangerColor = danger > 0.8 ? '#ff2200' : danger > 0.5 ? '#ff8800' : '#44ff88'
 
-    //  EventBus -> React state (HUD + screens).
-    useEffect(() =>
-    {
-        const onPhase = (p: Phase) =>
-        {
-            setPhase(p);
-            if (p === 'INTRO') setIntroSlide(0);
-            if (p !== 'PLAYING') setBanner('');
-        };
-        const onBanner = (text: string) => setBanner(text);
-        const onCheckpoint = (idx: number) => setCheckpoint(idx);
-        const onPower = (s: { active: boolean; pct: number }) => setPower(s);
-        const onHealth = (s: { hp: number; maxHp: number }) => setHealth(s);
-        const onDeath = (r: DeathReason) => setDeathReason(r);
+  return (
+    <div id="app">
+      <div id="game-container" />
 
-        EventBus.on(EV.PHASE_CHANGED, onPhase);
-        EventBus.on(EV.BANNER, onBanner);
-        EventBus.on(EV.CHECKPOINT, onCheckpoint);
-        EventBus.on(EV.POWER_STATE, onPower);
-        EventBus.on(EV.HEALTH_STATE, onHealth);
-        EventBus.on(EV.DEATH_REASON, onDeath);
-
-        return () =>
-        {
-            EventBus.removeListener(EV.PHASE_CHANGED, onPhase);
-            EventBus.removeListener(EV.BANNER, onBanner);
-            EventBus.removeListener(EV.CHECKPOINT, onCheckpoint);
-            EventBus.removeListener(EV.POWER_STATE, onPower);
-            EventBus.removeListener(EV.HEALTH_STATE, onHealth);
-            EventBus.removeListener(EV.DEATH_REASON, onDeath);
-        };
-    }, []);
-
-    //  React-side pause toggle (the scene freezes physics + tweens + sound).
-    useEffect(() =>
-    {
-        const onKey = (e: KeyboardEvent) =>
-        {
-            if (e.key !== 'Escape') return;
-            setPhase((cur) =>
-            {
-                if (cur === 'PLAYING')
-                {
-                    EventBus.emit(EV.PAUSE);
-                    return 'PAUSED';
-                }
-                if (cur === 'PAUSED')
-                {
-                    EventBus.emit(EV.RESUME);
-                    return 'PLAYING';
-                }
-                return cur;
-            });
-        };
-        window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
-    }, []);
-
-    //  Intro slides auto-advance: 3 slides over 10 seconds total (~3.33s each).
-    useEffect(() =>
-    {
-        if (phase !== 'INTRO') return;
-        const id = window.setInterval(() => setIntroSlide((s) => Math.min(s + 1, INTRO_LINES.length - 1)), 3333);
-        return () => window.clearInterval(id);
-    }, [phase]);
-
-    useEffect(() => setHasSave(GameManager.hasSavedGame()), [phase]);
-
-    const startGame = (fromCheckpoint: boolean) =>
-    {
-        EventBus.emit(EV.START_GAME, { fromCheckpoint });
-    };
-
-    const toMenu = () =>
-    {
-        if (phase === 'PAUSED') EventBus.emit(EV.RESUME);
-        EventBus.emit(EV.BACK_TO_MENU);
-    };
-
-    const attack = (type: 'punch' | 'surge') =>
-    {
-        EventBus.emit(EV.ATTACK_ACTION, type);
-    };
-
-    const toggleMute = () =>
-    {
-        const game = phaserRef.current?.game;
-        if (!game) return;
-        game.sound.mute = !game.sound.mute;
-        setMuted(game.sound.mute);
-    };
-
-    const playing = phase === 'PLAYING' || phase === 'INTRO' || phase === 'PAUSED';
-    const hpPct = Math.max(0, Math.min(100, (health.hp / health.maxHp) * 100));
-
-    return (
-        <div id="app">
-            {/* The Phaser canvas mounts into #game-container (src/game/main.ts). */}
-            <div id="game-container"></div>
-
-            <div id="hud">
-                {/* ---------- HUD (top bar) ---------- */}
-                {playing && (
-                    <div className="hud-top">
-                        <div className="hud-left-group">
-                            <div className="hud-chip">
-                                <span className="hud-label">ANCESTOR STONES</span>
-                                <span className="hud-value">{Math.max(0, checkpoint + 1)} / 3</span>
-                            </div>
-                            <div className="hp-meter">
-                                <div className="hp-head">
-                                    <span>KOLADE</span>
-                                    <span>{Math.max(0, Math.round(health.hp))}</span>
-                                </div>
-                                <div className="hp-track">
-                                    <div className="hp-fill" style={{ width: `${hpPct}%` }} />
-                                </div>
-                            </div>
-                        </div>
-                        <div className="hud-right">
-                            <button className="icon-btn" onClick={toggleMute} aria-label={muted ? 'Unmute' : 'Mute'}>
-                                <IconSound muted={muted} />
-                            </button>
-                            {phase === 'PLAYING' && (
-                                <button className="icon-btn" onClick={() => { EventBus.emit(EV.PAUSE); setPhase('PAUSED'); }} aria-label="Pause">
-                                    <IconPause />
-                                </button>
-                            )}
-                        </div>
-                    </div>
-                )}
-
-                {/* ---------- Bottom bar (power meter + hints) ---------- */}
-                {playing && (
-                    <div className="hud-bottom">
-                        <div className={`power-meter ${power.active ? 'power-active' : ''}`}>
-                            <div className="power-head">
-                                <span>OGUN’S IRON SURGE</span>
-                                <span>{power.pct >= 99 ? 'READY' : `${Math.round(power.pct)}%`}</span>
-                            </div>
-                            <div className="power-track">
-                                <div className="power-fill" style={{ width: `${Math.min(100, power.pct)}%` }} />
-                            </div>
-                        </div>
-                        <div className="controls-hint">
-                            <b>WASD / ARROWS</b> move &middot; <b>SPACE</b> jump &middot; <b>J</b> punch &middot; <b>K</b> surge &middot; <b>F</b> power &middot; <b>ESC</b> pause
-                        </div>
-                    </div>
-                )}
-
-                {/* ---------- Mobile combat / movement buttons ---------- */}
-                {phase === 'PLAYING' && 'ontouchstart' in window && (
-                    <div className="touch-controls">
-                        <div className="touch-pad">
-                            <button className="touch-btn" onPointerDown={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'a' }))} onPointerUp={() => window.dispatchEvent(new KeyboardEvent('keyup', { key: 'a' }))} aria-label="Left">◀</button>
-                            <button className="touch-btn" onPointerDown={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'd' }))} onPointerUp={() => window.dispatchEvent(new KeyboardEvent('keyup', { key: 'd' }))} aria-label="Right">▶</button>
-                            <button className="touch-btn touch-jump" onPointerDown={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ' }))} onPointerUp={() => window.dispatchEvent(new KeyboardEvent('keyup', { key: ' ' }))} aria-label="Jump">▲</button>
-                        </div>
-                        <div className="touch-actions">
-                            <button className="touch-btn touch-punch" onPointerDown={() => attack('punch')} aria-label="Punch">J</button>
-                            <button className="touch-btn touch-surge" onPointerDown={() => attack('surge')} aria-label="Surge">K</button>
-                        </div>
-                    </div>
-                )}
-
-                {/* ---------- Center banner ---------- */}
-                {banner !== '' && phase === 'PLAYING' && (
-                    <div className="banner">{banner}</div>
-                )}
-
-                {/* ---------- Checkpoint toast ---------- */}
-                {checkpoint >= 0 && phase === 'PLAYING' && (
-                    <div className="toast">Checkpoint saved — the stone glows behind you</div>
-                )}
-
-                {/* ---------- MENU ---------- */}
-                {phase === 'MENU' && (
-                    <div className="overlay">
-                        <div className="panel">
-                            <div className="eyebrow">A LAGOS SAGA</div>
-                            <h1 className="title">OMO <span className="gold">ORISHA</span></h1>
-                            <p className="tagline">
-                                A young Lagos boy channels the Orisha across danfo rooftops,
-                                stacked containers and market platforms — punching and surging
-                                through enforcers to reach the shrine gate.
-                            </p>
-                            <div className="btn-row">
-                                <button className="btn btn-primary" onClick={() => startGame(false)}>
-                                    <IconPlay /> New Journey
-                                </button>
-                                {hasSave && (
-                                    <button className="btn" onClick={() => startGame(true)}>
-                                        <IconResume /> Continue from Shrine Step
-                                    </button>
-                                )}
-                            </div>
-                            <div className="menu-hints">
-                                <span><b>WASD / ARROWS</b> move</span>
-                                <span><b>SPACE</b> jump</span>
-                                <span><b>J</b> punch &middot; <b>K</b> surge</span>
-                                <span><b>F / SHIFT</b> Ogun's power</span>
-                                <span><b>ESC</b> pause</span>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* ---------- INTRO (awakening slides) ---------- */}
-                {phase === 'INTRO' && (
-                    <div className="overlay overlay-dim" onClick={() => EventBus.emit(EV.SKIP_INTRO)}>
-                        <div className="intro-slide" key={introSlide}>
-                            <h2 className="intro-title">{INTRO_LINES[introSlide].title}</h2>
-                            <p className="intro-body">{INTRO_LINES[introSlide].body}</p>
-                        </div>
-                        <button className="skip-btn" onClick={(e) => { e.stopPropagation(); EventBus.emit(EV.SKIP_INTRO); }}>
-                            Skip intro →
-                        </button>
-                    </div>
-                )}
-
-                {/* ---------- PAUSE ---------- */}
-                {phase === 'PAUSED' && (
-                    <div className="overlay overlay-dim">
-                        <div className="panel panel-sm">
-                            <h2 className="panel-title">PAUSED</h2>
-                            <div className="btn-col">
-                                <button className="btn btn-primary" onClick={() => { EventBus.emit(EV.RESUME); setPhase('PLAYING'); }}>
-                                    <IconPlay /> Resume
-                                </button>
-                                <button className="btn" onClick={toMenu}>Main Menu</button>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* ---------- WIN ---------- */}
-                {phase === 'WIN' && (
-                    <div className="overlay">
-                        <div className="panel">
-                            <div className="eyebrow gold">THE GATE OPENS</div>
-                            <h2 className="panel-title">ORISHA SMILED</h2>
-                            <p className="tagline">
-                                Kolade crossed the Lagos spine and reached the shrine gate.
-                                The ancestors keep his name.
-                            </p>
-                            <div className="btn-row">
-                                <button className="btn btn-primary" onClick={() => startGame(false)}>
-                                    <IconPlay /> Play Again
-                                </button>
-                                <button className="btn" onClick={toMenu}>Main Menu</button>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* ---------- LOSS ---------- */}
-                {phase === 'LOSS' && (
-                    <div className="overlay">
-                        <div className="panel">
-                            <div className="eyebrow red">THE STREET WON</div>
-                            <h2 className="panel-title">
-                                {deathReason === 'FELL_INTO_PIT' ? 'INTO THE GAP' : 'CAUGHT BY THE AGBOLO'}
-                            </h2>
-                            <p className="tagline">
-                                {deathReason === 'FELL_INTO_PIT'
-                                    ? 'You missed a leap between the rooftops. The city swallows the careless.'
-                                    : 'The enforcers struck you down. Fight smarter — punch and surge.'}
-                            </p>
-                            <div className="btn-row">
-                                {hasSave && (
-                                    <button className="btn btn-primary" onClick={() => startGame(true)}>
-                                        <IconResume /> Retry from Checkpoint
-                                    </button>
-                                )}
-                                <button className={hasSave ? 'btn' : 'btn btn-primary'} onClick={() => startGame(false)}>
-                                    <IconPlay /> Restart Level
-                                </button>
-                                <button className="btn" onClick={toMenu}>Main Menu</button>
-                            </div>
-                        </div>
-                    </div>
-                )}
-            </div>
+      {/* HUD */}
+      {phase === 'PLAYING' && (
+        <div className="hud">
+          <div className="hud-left">
+            <div className="hud-chip"><span className="hud-label">DIST</span><span className="hud-val">{score.distance}m</span></div>
+            <div className="hud-chip gold"><span className="hud-label">GOLD</span><span className="hud-val">{score.coins}</span></div>
+            {score.multiplier > 1 && <div className="hud-chip boost">×{score.multiplier}</div>}
+          </div>
+          <div className="hud-right">
+            <div className="hud-chip"><span className="hud-label">SCORE</span><span className="hud-val">{score.score}</span></div>
+            <button className="icon-btn" onClick={toggleMute} aria-label="Mute">{muted ? '🔇' : '🔊'}</button>
+            <button className="icon-btn" onClick={pause} aria-label="Pause">⏸</button>
+          </div>
+          <div className={`danger-bar${dangerPulse ? ' pulse' : ''}`}>
+            <div className="danger-fill" style={{ width: `${Math.round(danger * 100)}%`, background: dangerColor }} />
+            <span className="danger-label">CHASER</span>
+          </div>
+          {/* Touch controls */}
+          <div className="touch-row">
+            <button className="tbtn" onPointerDown={() => lane('left')}>◀</button>
+            <button className="tbtn tbtn-jump" onPointerDown={() => lane('jump')}>▲ JUMP</button>
+            <button className="tbtn tbtn-slide" onPointerDown={() => lane('slide')}>▼ SLIDE</button>
+            <button className="tbtn" onPointerDown={() => lane('right')}>▶</button>
+          </div>
         </div>
-    );
-}
+      )}
 
-export default App;
+      {/* MENU */}
+      {phase === 'MENU' && (
+        <div className="overlay menu-overlay">
+          <div className="menu-card">
+            <div className="menu-stickman">🏃</div>
+            <h1 className="title">TEMPLE ESCAPE</h1>
+            <p className="subtitle">KOLADE'S RUN</p>
+            <div className="menu-stats">
+              <span>BEST <strong>{highScore}</strong></span>
+            </div>
+            <button className="btn-primary" onClick={start} disabled={!booted}>▶ START RUN</button>
+            <div className="controls-hint">
+              <p>← → or A/D — Switch Lane</p>
+              <p>↑ / W / Space — Jump &nbsp;·&nbsp; ↓ / S — Slide</p>
+              <p>Swipe on mobile &nbsp;·&nbsp; ESC — Pause</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* COUNTDOWN */}
+      {phase === 'COUNTDOWN' && (
+        <div className="overlay countdown-overlay">
+          <div className="countdown-num">{countdown > 0 ? countdown : 'RUN!'}</div>
+          <div className="countdown-sub">The Shadow is closing in…</div>
+        </div>
+      )}
+
+      {/* PAUSED */}
+      {phase === 'PAUSED' && (
+        <div className="overlay pause-overlay">
+          <div className="pause-card">
+            <h2>PAUSED</h2>
+            <button className="btn-primary" onClick={resume}>▶ RESUME</button>
+            <button className="btn-secondary" onClick={start}>↺ RESTART</button>
+            <button className="btn-ghost" onClick={toMenu}>✕ QUIT TO MENU</button>
+          </div>
+        </div>
+      )}
+
+      {/* LOSS */}
+      {phase === 'LOSS' && (
+        <div className="overlay loss-overlay">
+          <div className="loss-card">
+            <div className="loss-icon">💀</div>
+            <h2>CAUGHT BY THE SHADOW</h2>
+            <div className="loss-stats">
+              <div><span>DISTANCE</span><strong>{score.distance}m</strong></div>
+              <div><span>GOLD</span><strong>{score.coins}</strong></div>
+              <div><span>SCORE</span><strong>{score.score}</strong></div>
+              <div className={score.score >= highScore ? 'new-best' : ''}><span>BEST</span><strong>{highScore}</strong></div>
+            </div>
+            <button className="btn-primary" onClick={start}>↺ RUN AGAIN</button>
+            <button className="btn-ghost" onClick={toMenu}>MENU</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
